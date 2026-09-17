@@ -161,13 +161,13 @@
                 <span class="btn-icon">◇</span>
                 <span class="btn-text">{{ $t('history.step1Button') }}</span>
               </button>
-              <button 
-                class="modal-btn btn-simulation" 
+              <button
+                class="modal-btn btn-simulation"
                 @click="goToSimulation"
               >
-                <span class="btn-step">Step2</span>
+                <span class="btn-step">{{ simulationButtonMeta.step }}</span>
                 <span class="btn-icon">◈</span>
-                <span class="btn-text">{{ $t('history.step2Button') }}</span>
+                <span class="btn-text">{{ $t(simulationButtonMeta.label) }}</span>
               </button>
               <button 
                 class="modal-btn btn-report" 
@@ -195,6 +195,7 @@ import { ref, computed, onMounted, onUnmounted, onActivated, watch, nextTick } f
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { getSimulationHistory } from '../api/simulation'
+import { getSimulationProgress } from '../utils/simulationProgress'
 
 const router = useRouter()
 const route = useRoute()
@@ -292,19 +293,7 @@ const getCardStyle = (index) => {
 
 // 根据轮数进度获取样式类
 const getProgressClass = (simulation) => {
-  const current = simulation.current_round || 0
-  const total = simulation.total_rounds || 0
-  
-  if (total === 0 || current === 0) {
-    // 未开始
-    return 'not-started'
-  } else if (current >= total) {
-    // 已完成
-    return 'completed'
-  } else {
-    // 进行中
-    return 'in-progress'
-  }
+  return getSimulationProgress(simulation)
 }
 
 // 格式化日期（只显示日期部分）
@@ -420,16 +409,54 @@ const goToProject = () => {
   }
 }
 
-// 导航到环境配置页面（Simulation）
+// 导航到环境配置页面（Simulation）——依据模拟进度决定真正的落点，
+// 避免"进行中"或"已完成"的模拟被再次带回 Step2 重新开始
 const goToSimulation = () => {
-  if (selectedProject.value?.simulation_id) {
+  const sim = selectedProject.value
+  if (!sim?.simulation_id) return
+
+  const progress = getSimulationProgress(sim)
+
+  if (progress === 'not-started') {
     router.push({
       name: 'Simulation',
-      params: { simulationId: selectedProject.value.simulation_id }
+      params: { simulationId: sim.simulation_id }
     })
-    closeModal()
+  } else if (progress === 'completed' && sim.report_id) {
+    router.push({
+      name: 'Report',
+      params: { reportId: sim.report_id }
+    })
+  } else {
+    // in-progress，或 completed 但还没生成报告：回到 Step3 继续/收尾
+    const routeParams = {
+      name: 'SimulationRun',
+      params: { simulationId: sim.simulation_id }
+    }
+    if (sim.total_rounds) {
+      routeParams.query = { maxRounds: sim.total_rounds }
+    }
+    router.push(routeParams)
   }
+
+  closeModal()
 }
+
+// 按钮的 Step 标号 + 文案，随模拟进度变化（避免"进行中/已完成"的模拟仍显示 Step2）
+const simulationButtonMeta = computed(() => {
+  const sim = selectedProject.value
+  if (!sim) return { step: 'Step2', label: 'history.step2Button' }
+
+  const progress = getSimulationProgress(sim)
+
+  if (progress === 'not-started') {
+    return { step: 'Step2', label: 'history.step2Button' }
+  } else if (progress === 'completed' && sim.report_id) {
+    return { step: 'Step4', label: 'history.step4Button' }
+  } else {
+    return { step: 'Step3', label: 'history.step3Button' }
+  }
+})
 
 // 导航到分析报告页面（Report）
 const goToReport = () => {

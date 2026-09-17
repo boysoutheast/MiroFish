@@ -91,7 +91,27 @@
       </div>
 
       <div class="action-controls">
-        <button 
+        <button
+          class="action-btn secondary"
+          :disabled="phase !== 1 || isStopping || isStarting"
+          @click="handleStopClick"
+        >
+          {{ $t('step3.stopSimulationBtn') }}
+        </button>
+        <button
+          class="action-btn secondary"
+          :disabled="isStarting || isStopping"
+          @click="handleRestartClick"
+        >
+          {{ $t('step3.restartBtn') }}
+        </button>
+        <button
+          class="action-btn secondary"
+          @click="handleBackClick"
+        >
+          {{ $t('step3.backToStep2Btn') }}
+        </button>
+        <button
           class="action-btn primary"
           :disabled="phase !== 2 || isGeneratingReport"
           @click="handleNextStep"
@@ -296,6 +316,7 @@ import {
   getRunStatusDetail
 } from '../api/simulation'
 import { generateReport } from '../api/report'
+import { isRunnerAlive } from '../utils/simulationProgress'
 
 const { t } = useI18n()
 
@@ -380,47 +401,59 @@ const resetAllState = () => {
 }
 
 // 启动模拟
-const doStartSimulation = async () => {
+// force=false: 正常首次启动（不清空状态）。force=true: 明确重开，会先清空所有状态/日志。
+const doStartSimulation = async ({ force = false } = {}) => {
   if (!props.simulationId) {
     addLog(t('log.errorMissingSimId'))
     return
   }
 
-  // 先重置所有状态，确保不会受到上一次模拟的影响
-  resetAllState()
-  
+  // 每次真正开始一轮新的模拟生命周期（首次启动或 restart）都让 generation 前进一步，
+  // 用来让 stale 的 stop 请求在 resolve 时能判断出自己已经过期，不再覆盖状态。
+  simGeneration++
+
+  if (force) {
+    // 只有明确重开才清空之前的状态/日志，避免正常启动把刚才 attach 到的状态冲掉
+    resetAllState()
+  }
+
   isStarting.value = true
   startError.value = null
   addLog(t('log.startingDualSim'))
   emit('update-status', 'processing')
-  
+
   try {
     const params = {
       simulation_id: props.simulationId,
       platform: 'parallel',
-      force: true,  // 强制重新开始
+      force,
       enable_graph_memory_update: true  // 开启动态图谱更新
     }
-    
+
     if (props.maxRounds) {
       params.max_rounds = props.maxRounds
       addLog(t('log.setMaxRounds', { rounds: props.maxRounds }))
     }
-    
+
     addLog(t('log.graphMemoryUpdateEnabled'))
-    
+
     const res = await startSimulation(params)
-    
+
+    // 组件可能在这次网络请求期间已经被卸载（比如用户快速切走页面）——
+    // 不能在死掉的组件上设置 phase/runStatus 或启动新 timer，那正是
+    // HIGH-2 想堵掉的 leak，这里是它唯一还没被 onMounted 自身守住的分支。
+    if (!isMounted) return
+
     if (res.success && res.data) {
       if (res.data.force_restarted) {
         addLog(t('log.oldSimCleared'))
       }
       addLog(t('log.engineStarted'))
       addLog(`  ├─ PID: ${res.data.process_pid || '-'}`)
-      
+
       phase.value = 1
       runStatus.value = res.data
-      
+
       startStatusPolling()
       startDetailPolling()
     } else {
@@ -429,6 +462,15 @@ const doStartSimulation = async () => {
       emit('update-status', 'error')
     }
   } catch (err) {
+    // axios 拦截器把所有非 2xx 响应都 reject 成 Error —— 后端"已经在跑"这种
+    // 400 冲突也会走到这里，不是走 res.success === false 的分支。
+    if (err.response?.status === 400) {
+      addLog(t('log.attachingToRunningSim'))
+      await attachToRunningSimulation()
+      isStarting.value = false
+      return
+    }
+
     startError.value = err.message
     addLog(t('log.startException', { error: err.message }))
     emit('update-status', 'error')
@@ -440,18 +482,24 @@ const doStartSimulation = async () => {
 // 停止模拟
 const handleStopSimulation = async () => {
   if (!props.simulationId) return
-  
+
+  // 记录发起 stop 时的 generation：如果 stop 请求还没 resolve 时用户已经
+  // Restart（generation 会变），下面 success 分支就不应该再覆盖新一轮的状态。
+  const stopGeneration = simGeneration
+
   isStopping.value = true
   addLog(t('log.stoppingSim'))
-  
+
   try {
     const res = await stopSimulation({ simulation_id: props.simulationId })
-    
+
     if (res.success) {
       addLog(t('log.simStoppedSuccess'))
-      phase.value = 2
-      stopPolling()
-      emit('update-status', 'completed')
+      if (stopGeneration === simGeneration) {
+        phase.value = 2
+        stopPolling()
+        emit('update-status', 'completed')
+      }
     } else {
       addLog(t('log.stopFailed', { error: res.error || t('common.unknownError') }))
     }
@@ -462,15 +510,89 @@ const handleStopSimulation = async () => {
   }
 }
 
+// 点击 Stop 按钮：/stop 是纯粹的后端接口，一点保护都没有，UI 必须先确认
+const handleStopClick = async () => {
+  if (!confirm(t('log.confirmStopSimulation'))) return
+  await handleStopSimulation()
+}
+
+// 重新开始：会清空本次运行的全部日志/进度，务必先确认
+const handleRestartClick = async () => {
+  if (!confirm(t('log.confirmRestartSimulation'))) return
+  await doForceRestart()
+}
+
+const doForceRestart = async () => {
+  resetAllState()
+  await doStartSimulation({ force: true })
+}
+
+const handleBackClick = () => {
+  emit('go-back')
+}
+
+// Attach 到一个已经在跑（或已经跑完）的模拟，不重新 start，避免打断进度
+const attachToRunningSimulation = async (statusData = null) => {
+  // Attach 也算一次新的 generation：万一之前有一个 stale stop 请求还没 resolve，
+  // 它 resolve 时不该再把这次 attach 上来的状态覆盖掉。
+  simGeneration++
+
+  try {
+    const data = statusData || (await getRunStatus(props.simulationId)).data
+
+    // 同上：statusData 没传时这里有一次真实的网络 await，组件可能在这段时间
+    // 被卸载。
+    if (!isMounted) return false
+    if (!data) return false
+
+    runStatus.value = data
+    prevTwitterRound.value = data.twitter_current_round || 0
+    prevRedditRound.value = data.reddit_current_round || 0
+
+    if (data.runner_status === 'failed') {
+      phase.value = 2
+      addLog(t('log.simFailed') + (data.error ? `: ${data.error}` : ''))
+      emit('update-status', 'error')
+      return true
+    }
+
+    const isTerminal = data.runner_status === 'completed' || data.runner_status === 'stopped'
+    const roundsDone = data.total_rounds > 0 && data.current_round >= data.total_rounds
+
+    if (isTerminal || roundsDone) {
+      phase.value = 2
+      addLog(t('log.attachSimCompleted'))
+      emit('update-status', 'completed')
+      return true
+    }
+
+    phase.value = 1
+    emit('update-status', 'processing')
+    startStatusPolling()
+    startDetailPolling()
+    return true
+  } catch (err) {
+    addLog(t('log.checkStatusFailed', { error: err.message }))
+    return false
+  }
+}
+
 // 轮询状态
 let statusTimer = null
 let detailTimer = null
+// generation 计数器：每次真正启动/重开/attach 都会 +1，用来让过期的异步操作
+// （比如已经被 Restart 抢先的 stop 请求）识别出自己已经过期。
+let simGeneration = 0
 
 const startStatusPolling = () => {
+  // 保证幂等：attach-detect 和用户点击 Restart 可能各自调用一次，
+  // 没有这个 guard 会 leak 掉上一个 timer。
+  if (statusTimer) clearInterval(statusTimer)
   statusTimer = setInterval(fetchRunStatus, 2000)
 }
 
 const startDetailPolling = () => {
+  if (detailTimer) clearInterval(detailTimer)
   detailTimer = setInterval(fetchRunStatusDetail, 3000)
 }
 
@@ -688,14 +810,58 @@ watch(() => props.systemLogs?.length, () => {
   })
 })
 
-onMounted(() => {
+// onMounted 是 async 的，里面有多次 await——如果组件在某次 await 期间被卸载
+// （比如用户快速切换路由），onUnmounted 会在 timer 还没创建时就先跑完（空操作），
+// 之后 onMounted 剩下的部分仍会继续执行，在已经死掉的组件上启动 timer/发请求，
+// 造成永久 leak。用这个本地标志在每次 await 之后都检查一遍。
+let isMounted = true
+
+onMounted(async () => {
   addLog(t('log.step3Init'))
-  if (props.simulationId) {
-    doStartSimulation()
+
+  if (!props.simulationId) return
+
+  // Attach-first: 先看这个模拟是不是已经在跑（或已经跑完），避免每次挂载
+  // 组件都强制重开一次——那会打断正在进行的模拟，也会丢掉之前的日志。
+  try {
+    const res = await getRunStatus(props.simulationId)
+    if (!isMounted) return
+
+    if (res.success && res.data && isRunnerAlive(res.data.runner_status)) {
+      addLog(t('log.attachingToRunningSim'))
+      await attachToRunningSimulation(res.data)
+      return
+    }
+
+    if (res.success && res.data && res.data.total_rounds > 0 && res.data.current_round >= res.data.total_rounds) {
+      await attachToRunningSimulation(res.data)
+      return
+    }
+  } catch (err) {
+    if (!isMounted) return
+
+    // 区分"网络/后端 5xx 这类临时性错误"和"这模拟从来没跑过"（后端通常
+    // 用 404 表示）。前者如果悄悄当成 idle 直接 doStartSimulation，等于
+    // 把一个可能还在跑的模拟错误地重新开一次；后者才是真的可以当 idle。
+    const isTransientError = !err.response || err.response?.status >= 500
+    addLog(t('log.checkStatusFailed', { error: err.message }))
+
+    if (isTransientError) {
+      startError.value = err.message
+      emit('update-status', 'error')
+      return
+    }
   }
+
+  if (!isMounted) return
+
+  // idle / 从未跑过：正常启动（doStartSimulation 内部的 catch 还会兜底处理
+  // "刚好在这一瞬间已经被别处启动了" 的 400 竞态）
+  await doStartSimulation({ force: false })
 })
 
 onUnmounted(() => {
+  isMounted = false
   stopPolling()
 })
 </script>
@@ -872,6 +1038,12 @@ onUnmounted(() => {
   align-items: center;
 }
 
+.action-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* Action Button */
 .action-btn {
   display: inline-flex;
@@ -895,6 +1067,17 @@ onUnmounted(() => {
 
 .action-btn.primary:hover:not(:disabled) {
   background: #333;
+}
+
+.action-btn.secondary {
+  background: #FFF;
+  color: #333;
+  border: 1px solid #DDD;
+}
+
+.action-btn.secondary:hover:not(:disabled) {
+  background: #F5F5F5;
+  border-color: #CCC;
 }
 
 .action-btn:disabled {

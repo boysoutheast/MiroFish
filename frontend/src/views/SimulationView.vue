@@ -35,11 +35,27 @@
       </div>
     </header>
 
+    <!-- 检测到有正在运行的模拟：给一个显式的横条，而不是一进来就自动 stop -->
+    <div v-if="runningSimDetected" class="running-sim-banner">
+      <span class="banner-text">{{ $t('step2.runningSimDetectedBanner') }}</span>
+      <div class="banner-actions">
+        <router-link
+          class="banner-link"
+          :to="{ name: 'SimulationRun', params: { simulationId: currentSimulationId } }"
+        >
+          {{ $t('step2.continueToStep3') }}
+        </router-link>
+        <button class="banner-stop-btn" :disabled="isStoppingRunningSim" @click="handleStopRunningSimClick">
+          {{ $t('step2.stopRunningSimBtn') }}
+        </button>
+      </div>
+    </div>
+
     <!-- Main Content Area -->
     <main class="content-area">
       <!-- Left Panel: Graph -->
       <div class="panel-wrapper left" :style="leftPanelStyle">
-        <GraphPanel 
+        <GraphPanel
           :graphData="graphData"
           :loading="graphLoading"
           :currentPhase="2"
@@ -94,6 +110,8 @@ const graphData = ref(null)
 const graphLoading = ref(false)
 const systemLogs = ref([])
 const currentStatus = ref('processing') // processing | completed | error
+const runningSimDetected = ref(false) // Step2 挂载时检测到有模拟还在跑（只读检测，不自动停）
+const isStoppingRunningSim = ref(false) // 横条 Stop 按钮的 busy 状态，防止连点两次触发两轮 stop
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -178,12 +196,55 @@ const handleNextStep = (params = {}) => {
 // --- Data Logic ---
 
 /**
- * 检查并关闭正在运行的模拟
- * 当用户从 Step 3 返回到 Step 2 时，默认用户要退出模拟
+ * 只读检测：有没有模拟还在跑（不停止任何东西）。
+ * 用来决定要不要显示 "Stop Running Simulation" 横条——
+ * 停不停交给用户点显式按钮，不再一进 Step2 就自动停。
+ */
+const detectRunningSimulation = async () => {
+  if (!currentSimulationId.value) return
+
+  try {
+    const envStatusRes = await getEnvStatus({ simulation_id: currentSimulationId.value })
+    if (envStatusRes.success && envStatusRes.data?.env_alive) {
+      runningSimDetected.value = true
+      return
+    }
+
+    const simRes = await getSimulation(currentSimulationId.value)
+    if (simRes.success && simRes.data?.status === 'running') {
+      runningSimDetected.value = true
+    }
+  } catch (err) {
+    // 检测失败 ≠ 没有模拟在跑，是 UNKNOWN——不能悄悄吞掉，用户得知道
+    // 横条判断可能不准，需要手动 refresh 再确认。
+    console.warn('检查模拟运行状态失败:', err)
+    addLog(t('log.detectRunningSimFailed', { error: err.message }))
+  }
+}
+
+/**
+ * 点击横条上的 Stop 按钮才会真正停止——由用户显式触发。
+ */
+const handleStopRunningSimClick = async () => {
+  if (isStoppingRunningSim.value) return
+  if (!confirm(t('log.confirmStopSimulation'))) return
+
+  isStoppingRunningSim.value = true
+  try {
+    await checkAndStopRunningSimulation()
+    runningSimDetected.value = false
+  } finally {
+    isStoppingRunningSim.value = false
+  }
+}
+
+/**
+ * 检查并关闭正在运行的模拟——现在只在用户点击 Stop 横条按钮时调用，
+ * 不再挂载即自动执行（那会把用户还想继续的模拟直接停掉）。
  */
 const checkAndStopRunningSimulation = async () => {
   if (!currentSimulationId.value) return
-  
+
   try {
     // 先检查模拟环境是否存活
     const envStatusRes = await getEnvStatus({ simulation_id: currentSimulationId.value })
@@ -293,10 +354,10 @@ const refreshGraph = () => {
 
 onMounted(async () => {
   addLog(t('log.simViewInit'))
-  
-  // 检查并关闭正在运行的模拟（用户从 Step 3 返回时）
-  await checkAndStopRunningSimulation()
-  
+
+  // 只读检测有没有模拟还在跑，决定要不要显示横条——不自动停任何东西
+  await detectRunningSimulation()
+
   // 加载模拟数据
   loadSimulationData()
 })
@@ -434,6 +495,49 @@ onMounted(async () => {
 
 .panel-wrapper.left {
   border-right: 1px solid #EAEAEA;
+}
+
+.running-sim-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 24px;
+  background: #FFF7E6;
+  border-bottom: 1px solid #FFE0A3;
+  font-size: 13px;
+  color: #333;
+}
+
+.banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.banner-link {
+  font-weight: 700;
+  color: #000;
+  text-decoration: underline;
+}
+
+.banner-stop-btn {
+  border: 1px solid #DDD;
+  background: #FFF;
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.banner-stop-btn:hover:not(:disabled) {
+  background: #F5F5F5;
+}
+
+.banner-stop-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>
 
