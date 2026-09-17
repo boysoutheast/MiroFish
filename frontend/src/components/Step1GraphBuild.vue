@@ -158,17 +158,53 @@
         <div class="card-content">
           <p class="api-note">POST /api/simulation/create</p>
           <p class="description">{{ $t('step1.buildCompleteDesc') }}</p>
-          <button 
-            class="action-btn" 
-            :disabled="currentPhase < 2 || creatingSimulation"
+          <button
+            class="action-btn"
+            :disabled="currentPhase < 2 || creatingSimulation || checkingExisting"
             @click="handleEnterEnvSetup"
           >
-            <span v-if="creatingSimulation" class="spinner-sm"></span>
-            {{ creatingSimulation ? $t('step1.creating') : $t('step1.enterEnvSetup') + ' ➝' }}
+            <span v-if="creatingSimulation || checkingExisting" class="spinner-sm"></span>
+            {{ (creatingSimulation && $t('step1.creating')) || (checkingExisting && $t('step1.checkingExisting')) || ($t('step1.enterEnvSetup') + ' ➝') }}
           </button>
+
+          <!-- 检查已有模拟失败 -->
+          <div v-if="checkExistingError" class="check-error-box">
+            <span class="check-error-text">{{ $t('step1.checkExistingFailed', { error: checkExistingError }) }}</span>
+            <button class="retry-btn" :disabled="checkingExisting" @click="handleEnterEnvSetup">{{ $t('step1.retry') }}</button>
+          </div>
         </div>
       </div>
     </div>
+
+    <!-- 已有模拟选择弹窗 -->
+    <Teleport to="body">
+      <div v-if="showSimulationPicker" class="picker-overlay" @click.self="showSimulationPicker = false">
+        <div class="picker-content">
+          <div class="picker-header">
+            <span class="picker-title">{{ $t('step1.selectSimulationTitle') }}</span>
+            <button class="close-btn" @click="showSimulationPicker = false">×</button>
+          </div>
+          <p class="picker-desc">{{ $t('step1.selectSimulationDesc') }}</p>
+          <div class="picker-list">
+            <div
+              v-for="sim in existingSimulations"
+              :key="sim.simulation_id"
+              class="picker-item"
+              @click="selectExistingSimulation(sim)"
+            >
+              <span class="picker-item-id">{{ sim.simulation_id }}</span>
+              <span class="picker-item-date">{{ formatPickerDate(sim.created_at) }}</span>
+              <span class="picker-item-status" :class="getSimulationProgress(sim)">
+                {{ formatPickerStatus(sim) }}
+              </span>
+            </div>
+          </div>
+          <button class="create-new-btn" @click="createNewSimulation">
+            {{ $t('step1.createNewSimulation') }}
+          </button>
+        </div>
+      </div>
+    </Teleport>
 
     <!-- Bottom Info / Logs -->
     <div class="system-logs">
@@ -190,7 +226,8 @@
 import { computed, ref, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { createSimulation } from '../api/simulation'
+import { createSimulation, getSimulationHistory } from '../api/simulation'
+import { getSimulationProgress, resolveSimulationRoute } from '../utils/simulationProgress'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -209,16 +246,67 @@ defineEmits(['next-step'])
 const selectedOntologyItem = ref(null)
 const logContent = ref(null)
 const creatingSimulation = ref(false)
+const checkingExisting = ref(false)
+const checkExistingError = ref(null)
+const showSimulationPicker = ref(false)
+const existingSimulations = ref([])
 
-// 进入环境搭建 - 创建 simulation 并跳转
+// 进入环境搭建 - 先检查该项目是否已有 simulation，避免每次都从零新建（Opsi 3）
 const handleEnterEnvSetup = async () => {
   if (!props.projectData?.project_id || !props.projectData?.graph_id) {
     console.error('缺少项目或图谱信息')
     return
   }
-  
+
+  checkingExisting.value = true
+  checkExistingError.value = null
+
+  let matches = []
+  try {
+    const historyRes = await getSimulationHistory(100)
+    if (!historyRes.success) {
+      throw new Error(historyRes.error || t('common.unknownError'))
+    }
+    const all = historyRes.data || []
+    const missingProjectIdCount = all.filter(sim => !sim.project_id).length
+    if (missingProjectIdCount > 0) {
+      console.warn(`[Step1GraphBuild] ${missingProjectIdCount} 条模拟记录缺少 project_id，已被过滤，不计入匹配数（可能是后端数据缺陷，不代表真的 0 个已有模拟）`)
+    }
+    matches = all.filter(sim => sim.project_id === props.projectData.project_id)
+  } catch (err) {
+    console.error('检查已有模拟失败:', err)
+    checkExistingError.value = err.message || t('common.unknownError')
+    checkingExisting.value = false
+    return
+  }
+
+  checkingExisting.value = false
+
+  if (matches.length === 0) {
+    // 没有已有 simulation，行为跟以前一样：直接建新的
+    await createNewSimulation()
+    return
+  }
+
+  if (matches.length === 1 && matches[0].report_id) {
+    // 唯一一个，而且已经有报告 -> 直接跳过去，零点击
+    router.push({
+      name: 'Report',
+      params: { reportId: matches[0].report_id }
+    })
+    return
+  }
+
+  // 其余情况（1个但没报告，或者 >1个）：给用户选
+  existingSimulations.value = matches
+  showSimulationPicker.value = true
+}
+
+// 建新的 simulation（旧行为，"Buat Baru" 按钮或 0 已有 simulation 时走这里）
+const createNewSimulation = async () => {
+  showSimulationPicker.value = false
   creatingSimulation.value = true
-  
+
   try {
     const res = await createSimulation({
       project_id: props.projectData.project_id,
@@ -226,7 +314,7 @@ const handleEnterEnvSetup = async () => {
       enable_twitter: true,
       enable_reddit: true
     })
-    
+
     if (res.success && res.data?.simulation_id) {
       // 跳转到 simulation 页面
       router.push({
@@ -243,6 +331,33 @@ const handleEnterEnvSetup = async () => {
   } finally {
     creatingSimulation.value = false
   }
+}
+
+// 从选择弹窗里点某个已有 simulation
+const selectExistingSimulation = (sim) => {
+  showSimulationPicker.value = false
+  const route = resolveSimulationRoute(sim)
+  if (route) {
+    router.push(route)
+  }
+}
+
+// 选择弹窗里每一行的日期显示
+const formatPickerDate = (dateStr) => {
+  if (!dateStr) return ''
+  try {
+    return new Date(dateStr).toLocaleString('en-US', { hour12: false })
+  } catch {
+    return dateStr
+  }
+}
+
+// 选择弹窗里每一行的状态文字
+const formatPickerStatus = (sim) => {
+  const progress = getSimulationProgress(sim)
+  if (progress === 'completed' && sim.report_id) return t('history.step4Button')
+  if (progress === 'not-started') return t('history.notStarted')
+  return t('history.roundsProgress', { current: sim.current_round || 0, total: sim.total_rounds || 0 })
 }
 
 const selectOntologyItem = (item, type) => {
@@ -642,6 +757,157 @@ watch(() => props.systemLogs.length, () => {
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Step 03 Check-Existing Error */
+.check-error-box {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #FFF3F0;
+  border: 1px solid #FFCCBC;
+  border-radius: 4px;
+}
+
+.check-error-text {
+  font-size: 11px;
+  color: #D32F2F;
+  flex: 1;
+}
+
+.retry-btn {
+  background: #FF5722;
+  color: #FFF;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.retry-btn:hover {
+  opacity: 0.85;
+}
+
+/* Simulation Picker Overlay */
+.picker-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  backdrop-filter: blur(4px);
+}
+
+.picker-content {
+  background: #FFF;
+  width: 480px;
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #EAEAEA;
+  border-radius: 8px;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+}
+
+.picker-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #EAEAEA;
+}
+
+.picker-title {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.picker-desc {
+  padding: 0 20px;
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: #666;
+}
+
+.picker-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.picker-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #F9F9F9;
+  border: 1px solid #EEE;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.picker-item:hover {
+  border-color: #FF5722;
+  background: #FFF3F0;
+}
+
+.picker-item-id {
+  font-size: 11px;
+  font-weight: 600;
+  color: #333;
+  flex-shrink: 0;
+}
+
+.picker-item-date {
+  font-size: 10px;
+  color: #999;
+  flex: 1;
+  text-align: center;
+}
+
+.picker-item-status {
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.picker-item-status.completed { color: #10B981; }
+.picker-item-status.in-progress { color: #F59E0B; }
+.picker-item-status.not-started { color: #9CA3AF; }
+
+.create-new-btn {
+  margin: 0 20px 20px;
+  background: #000;
+  color: #FFF;
+  border: none;
+  padding: 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.create-new-btn:hover {
+  opacity: 0.85;
+}
 
 /* System Logs */
 .system-logs {

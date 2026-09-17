@@ -195,7 +195,7 @@ import { ref, computed, onMounted, onUnmounted, onActivated, watch, nextTick } f
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { getSimulationHistory } from '../api/simulation'
-import { getSimulationProgress } from '../utils/simulationProgress'
+import { getSimulationProgress, resolveSimulationRoute } from '../utils/simulationProgress'
 
 const router = useRouter()
 const route = useRoute()
@@ -413,32 +413,10 @@ const goToProject = () => {
 // 避免"进行中"或"已完成"的模拟被再次带回 Step2 重新开始
 const goToSimulation = () => {
   const sim = selectedProject.value
-  if (!sim?.simulation_id) return
+  const route = resolveSimulationRoute(sim)
+  if (!route) return
 
-  const progress = getSimulationProgress(sim)
-
-  if (progress === 'not-started') {
-    router.push({
-      name: 'Simulation',
-      params: { simulationId: sim.simulation_id }
-    })
-  } else if (progress === 'completed' && sim.report_id) {
-    router.push({
-      name: 'Report',
-      params: { reportId: sim.report_id }
-    })
-  } else {
-    // in-progress，或 completed 但还没生成报告：回到 Step3 继续/收尾
-    const routeParams = {
-      name: 'SimulationRun',
-      params: { simulationId: sim.simulation_id }
-    }
-    if (sim.total_rounds) {
-      routeParams.query = { maxRounds: sim.total_rounds }
-    }
-    router.push(routeParams)
-  }
-
+  router.push(route)
   closeModal()
 }
 

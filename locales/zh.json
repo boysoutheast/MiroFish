@@ -95,7 +95,13 @@
     "creating": "创建中...",
     "enterEnvSetup": "进入环境搭建",
     "createSimulationFailed": "创建模拟失败: {error}",
-    "createSimulationException": "创建模拟异常: {error}"
+    "createSimulationException": "创建模拟异常: {error}",
+    "checkingExisting": "正在检查已有模拟...",
+    "checkExistingFailed": "检查已有模拟失败: {error}",
+    "retry": "重试",
+    "selectSimulationTitle": "选择模拟",
+    "selectSimulationDesc": "该项目已有模拟记录，可继续下方任一模拟，或创建新的。",
+    "createNewSimulation": "创建新模拟"
   },
   "step2": {
     "simInstanceInit": "模拟实例初始化",

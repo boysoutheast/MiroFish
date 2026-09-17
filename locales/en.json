@@ -95,7 +95,13 @@
     "creating": "Creating...",
     "enterEnvSetup": "Enter Environment Setup",
     "createSimulationFailed": "Failed to create simulation: {error}",
-    "createSimulationException": "Simulation creation error: {error}"
+    "createSimulationException": "Simulation creation error: {error}",
+    "checkingExisting": "Checking existing simulations...",
+    "checkExistingFailed": "Failed to check existing simulations: {error}",
+    "retry": "Retry",
+    "selectSimulationTitle": "Select Simulation",
+    "selectSimulationDesc": "This project already has simulations. Continue one below, or create a new one.",
+    "createNewSimulation": "Create New Simulation"
   },
   "step2": {
     "simInstanceInit": "Simulation Instance Initialization",
