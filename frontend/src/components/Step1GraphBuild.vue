@@ -251,6 +251,34 @@ const checkExistingError = ref(null)
 const showSimulationPicker = ref(false)
 const existingSimulations = ref([])
 
+// 拉取该项目已有的 simulation 列表（纯数据获取，不碰任何 UI 状态）
+// 被手动点击（handleEnterEnvSetup）和自动检查（autoCheckExistingSimulation）共用
+const fetchMatchingSimulations = async () => {
+  const historyRes = await getSimulationHistory(100)
+  if (!historyRes.success) {
+    throw new Error(historyRes.error || t('common.unknownError'))
+  }
+  const all = historyRes.data || []
+  const missingProjectIdCount = all.filter(sim => !sim.project_id).length
+  if (missingProjectIdCount > 0) {
+    console.warn(`[Step1GraphBuild] ${missingProjectIdCount} 条模拟记录缺少 project_id，已被过滤，不计入匹配数（可能是后端数据缺陷，不代表真的 0 个已有模拟）`)
+  }
+  return all.filter(sim => sim.project_id === props.projectData.project_id)
+}
+
+// 唯一一个且已有报告 -> 直接跳转 Report，零点击
+// 共用于手动点击和自动检查这两条路径
+const redirectIfSingleReport = (matches) => {
+  if (matches.length === 1 && matches[0].report_id) {
+    router.push({
+      name: 'Report',
+      params: { reportId: matches[0].report_id }
+    })
+    return true
+  }
+  return false
+}
+
 // 进入环境搭建 - 先检查该项目是否已有 simulation，避免每次都从零新建（Opsi 3）
 const handleEnterEnvSetup = async () => {
   if (!props.projectData?.project_id || !props.projectData?.graph_id) {
@@ -263,16 +291,7 @@ const handleEnterEnvSetup = async () => {
 
   let matches = []
   try {
-    const historyRes = await getSimulationHistory(100)
-    if (!historyRes.success) {
-      throw new Error(historyRes.error || t('common.unknownError'))
-    }
-    const all = historyRes.data || []
-    const missingProjectIdCount = all.filter(sim => !sim.project_id).length
-    if (missingProjectIdCount > 0) {
-      console.warn(`[Step1GraphBuild] ${missingProjectIdCount} 条模拟记录缺少 project_id，已被过滤，不计入匹配数（可能是后端数据缺陷，不代表真的 0 个已有模拟）`)
-    }
-    matches = all.filter(sim => sim.project_id === props.projectData.project_id)
+    matches = await fetchMatchingSimulations()
   } catch (err) {
     console.error('检查已有模拟失败:', err)
     checkExistingError.value = err.message || t('common.unknownError')
@@ -288,16 +307,46 @@ const handleEnterEnvSetup = async () => {
     return
   }
 
-  if (matches.length === 1 && matches[0].report_id) {
-    // 唯一一个，而且已经有报告 -> 直接跳过去，零点击
-    router.push({
-      name: 'Report',
-      params: { reportId: matches[0].report_id }
-    })
+  if (redirectIfSingleReport(matches)) {
     return
   }
 
   // 其余情况（1个但没报告，或者 >1个）：给用户选
+  existingSimulations.value = matches
+  showSimulationPicker.value = true
+}
+
+// 组件挂载时自动检查已有 simulation，不用户等点击 "Enter Env Setup" 才发现
+// 跟手动点击不同：0 个已有 simulation 时啥都不做（不擅自新建），失败时静默 warn（不打断 Step1 显示）
+// 同样要设 checkingExisting，避免自动检查还在飞的时候用户手动点按钮触发第二个并发请求
+const autoCheckExistingSimulation = async () => {
+  if (!props.projectData?.project_id || !props.projectData?.graph_id) {
+    return
+  }
+
+  checkingExisting.value = true
+
+  let matches = []
+  try {
+    matches = await fetchMatchingSimulations()
+  } catch (err) {
+    console.warn('[Step1GraphBuild] 自动检查已有模拟失败，保持 Step1 正常显示，用户仍可用按钮手动重试:', err)
+    checkingExisting.value = false
+    return
+  }
+
+  checkingExisting.value = false
+
+  if (matches.length === 0) {
+    // 0 个已有 simulation -> 什么都不做，留在 Step1，等用户手动点击决定
+    return
+  }
+
+  if (redirectIfSingleReport(matches)) {
+    return
+  }
+
+  // 其余情况（1个但没报告，或者 >1个）：自动弹出选择框，用户仍可手动关掉
   existingSimulations.value = matches
   showSimulationPicker.value = true
 }
@@ -376,6 +425,22 @@ const formatDate = (dateStr) => {
   const d = new Date(dateStr)
   return d.toLocaleTimeString('en-US', { hour12: false }) + '.' + d.getMilliseconds()
 }
+
+// 自动检查：graph 已完成时自动看有没有已有 simulation，不用等用户点按钮
+// 用 watch 而不是 onMounted：MainView 里 projectData 一开始是 ref(null)，
+// 要等 loadProject() 异步跑完才会被赋值，child 的 onMounted 比这更早触发，
+// 若用 onMounted 判断 status，最常见的场景（打开时状态就已是 graph_completed）
+// 永远读到 null，条件永远为 false，功能等于没跑。
+// immediate: true 是为了兼容 projectData 恰好已经就位的边界情况。
+// autoCheckDone 保证只跑一次，避免 status 之后又变化时重复触发。
+let autoCheckDone = false
+watch(() => props.projectData?.status, (newStatus) => {
+  if (autoCheckDone || newStatus !== 'graph_completed') {
+    return
+  }
+  autoCheckDone = true
+  autoCheckExistingSimulation()
+}, { immediate: true })
 
 // Auto-scroll logs
 watch(() => props.systemLogs.length, () => {

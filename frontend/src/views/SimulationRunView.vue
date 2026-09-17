@@ -2,13 +2,8 @@
   <div class="main-view">
     <!-- Header -->
     <header class="app-header">
-      <div class="header-left">
-        <div class="brand" @click="router.push('/')">
-          <span class="brand-name">Kanzen AI Panelist</span>
-          <span class="brand-credit">by MiroFish</span>
-        </div>
-      </div>
-      
+      <div class="header-left"></div>
+
       <div class="header-center">
         <div class="view-switcher">
           <button 
@@ -345,28 +340,6 @@ onUnmounted(() => {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
-}
-
-.brand {
-  display: flex;
-  flex-direction: column;
-  line-height: 1.1;
-  cursor: pointer;
-}
-
-.brand-name {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 800;
-  font-size: 18px;
-  letter-spacing: 1px;
-}
-
-.brand-credit {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 500;
-  font-size: 10px;
-  letter-spacing: 0.5px;
-  color: #999;
 }
 
 .view-switcher {
