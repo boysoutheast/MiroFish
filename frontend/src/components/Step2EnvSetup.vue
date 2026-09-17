@@ -50,6 +50,7 @@
           </div>
           <div class="step-status">
             <span v-if="phase > 1" class="badge success">{{ $t('common.completed') }}</span>
+            <span v-else-if="phase === 1 && isAttaching" class="badge processing">{{ $t('common.processing') }}</span>
             <span v-else-if="phase === 1" class="badge processing">{{ prepareProgress }}%</span>
             <span v-else class="badge pending">{{ $t('common.pending') }}</span>
           </div>
@@ -637,6 +638,7 @@ import { useI18n } from 'vue-i18n'
 import {
   prepareSimulation,
   getPrepareStatus,
+  getSimulation,
   getSimulationProfilesRealtime,
   getSimulationConfig,
   getSimulationConfigRealtime
@@ -657,6 +659,8 @@ const emit = defineEmits(['go-back', 'next-step', 'add-log', 'update-status'])
 const phase = ref(0) // 0: 初始化, 1: 生成人设, 2: 生成配置, 3: 完成
 const taskId = ref(null)
 const prepareProgress = ref(0)
+// attach-first 路径下没有精确的 %进度来源，badge 展示定性状态而不是可能长期停在 0% 的数字
+const isAttaching = ref(false)
 const currentStage = ref('')
 const progressMessage = ref('')
 const profiles = ref([])
@@ -796,7 +800,11 @@ const startPrepareSimulation = async () => {
       use_llm_for_profiles: true,
       parallel_profile_count: 5
     })
-    
+
+    // 组件可能在这次网络请求期间已经被卸载（比如用户快速切走页面）——
+    // 不能在死掉的组件上设置 phase/taskId 或启动新 timer。
+    if (!isMounted) return
+
     if (res.success && res.data) {
       if (res.data.already_prepared) {
         addLog(t('log.detectedExistingPrep'))
@@ -827,12 +835,15 @@ const startPrepareSimulation = async () => {
       emit('update-status', 'error')
     }
   } catch (err) {
+    if (!isMounted) return
     addLog(t('log.prepareException', { error: err.message }))
     emit('update-status', 'error')
   }
 }
 
 const startPolling = () => {
+  // 保证幂等：这里是防御性 guard，防止任何调用路径重复调用时 leak 掉上一个 timer。
+  if (pollTimer) clearInterval(pollTimer)
   pollTimer = setInterval(pollPrepareStatus, 2000)
 }
 
@@ -844,6 +855,8 @@ const stopPolling = () => {
 }
 
 const startProfilesPolling = () => {
+  // 防御性 guard：任何调用路径重复调用时避免 leak 掉上一个 timer。
+  if (profilesTimer) clearInterval(profilesTimer)
   profilesTimer = setInterval(fetchProfilesRealtime, 3000)
 }
 
@@ -856,13 +869,14 @@ const stopProfilesPolling = () => {
 
 const pollPrepareStatus = async () => {
   if (!taskId.value && !props.simulationId) return
-  
+
   try {
     const res = await getPrepareStatus({
       task_id: taskId.value,
       simulation_id: props.simulationId
     })
-    
+    if (!isMounted) return
+
     if (res.success && res.data) {
       const data = res.data
       
@@ -919,7 +933,8 @@ const fetchProfilesRealtime = async () => {
   
   try {
     const res = await getSimulationProfilesRealtime(props.simulationId)
-    
+    if (!isMounted) return
+
     if (res.success && res.data) {
       const prevCount = profiles.value.length
       profiles.value = res.data.profiles || []
@@ -960,6 +975,8 @@ const fetchProfilesRealtime = async () => {
 
 // 配置轮询
 const startConfigPolling = () => {
+  // 防御性 guard：任何调用路径重复调用时避免 leak 掉上一个 timer。
+  if (configTimer) clearInterval(configTimer)
   configTimer = setInterval(fetchConfigRealtime, 2000)
 }
 
@@ -975,7 +992,8 @@ const fetchConfigRealtime = async () => {
   
   try {
     const res = await getSimulationConfigRealtime(props.simulationId)
-    
+    if (!isMounted) return
+
     if (res.success && res.data) {
       const data = res.data
 
@@ -1021,6 +1039,7 @@ const fetchConfigRealtime = async () => {
         }
         
         stopConfigPolling()
+        stopProfilesPolling()
         phase.value = 4
         addLog(t('log.envSetupComplete'))
         emit('update-status', 'completed')
@@ -1032,16 +1051,19 @@ const fetchConfigRealtime = async () => {
 }
 
 const loadPreparedData = async () => {
+  if (!isMounted) return
   phase.value = 2
   addLog(t('log.loadingExistingConfig'))
 
   // 最后获取一次 Profiles
   await fetchProfilesRealtime()
+  if (!isMounted) return
   addLog(t('log.loadedAgentProfiles', { count: profiles.value.length }))
 
   // 获取配置（使用实时接口）
   try {
     const res = await getSimulationConfigRealtime(props.simulationId)
+    if (!isMounted) return
     if (res.success && res.data) {
       const configState = res.data
 
@@ -1051,6 +1073,11 @@ const loadPreparedData = async () => {
       }
 
       if (configState.config_generated && configState.config) {
+        // 防御性 guard：走这条完成路径时可能还有上一轮 attach/polling 留下的
+        // config/profiles timer 在跑，这里主动收掉，避免多等一个 tick 才
+        // 靠 fetchConfigRealtime 自愈（那样会重复 addLog + 重复 emit completed）。
+        stopConfigPolling()
+        stopProfilesPolling()
         simulationConfig.value = configState.config
         addLog(t('log.configLoadSuccess'))
 
@@ -1072,6 +1099,7 @@ const loadPreparedData = async () => {
       }
     }
   } catch (err) {
+    if (!isMounted) return
     handlePrepareFailure(t('log.loadConfigFailed', { error: err.message }))
   }
 }
@@ -1086,15 +1114,86 @@ watch(() => props.systemLogs?.length, () => {
   })
 })
 
-onMounted(() => {
-  // 自动开始准备流程
-  if (props.simulationId) {
-    addLog(t('log.step2Init'))
-    startPrepareSimulation()
+// Attach 到一个已经在准备中/已经准备完的模拟，不重新 POST /prepare，避免
+// 和已有的准备任务并行跑出第二份 LLM 生成（config_generated 还没到 true
+// 之前，后端 /prepare 没有任何"已有任务在跑"的保护）。
+//
+// 已知设计缺口：后端 /api/simulation/prepare/status 只能靠 task_id 查具体
+// 进度，simulation_id 单独查询时，没完成前一律回 "not_started"（看不出
+// 有没有活着的任务）；state.status==='preparing' 只能说明"曾经/现在有任务
+// 在跑"，拿不到那个任务的 task_id。所以这里 attach 不到精确的 %进度——
+// 只能靠 profiles/config 的 realtime 轮询（两者都是按 simulation_id 查，
+// 不需要 task_id）间接反映真实进度，直到 config_generated 变 true。
+const attachToPreparingSimulation = () => {
+  addLog(t('log.detectedExistingPrep'))
+  phase.value = 1
+  isAttaching.value = true
+  emit('update-status', 'processing')
+  startProfilesPolling()
+  startConfigPolling()
+}
+
+let isMounted = true
+
+onMounted(async () => {
+  addLog(t('log.step2Init'))
+
+  if (!props.simulationId) return
+
+  // Attach-first：先查一次这个模拟的真实状态，再决定要不要发 POST /prepare，
+  // 避免每次组件重新挂载（remount/refresh）都无条件重开一次准备流程——
+  // 那会跟正在跑的准备任务并行，重复消耗 LLM 还可能造成写文件竞态。
+  try {
+    const res = await getSimulation(props.simulationId)
+    if (!isMounted) return
+
+    if (res.success && res.data) {
+      const state = res.data
+
+      if (state.status === 'failed' && state.error) {
+        handlePrepareFailure(state.error)
+        return
+      }
+
+      if (state.config_generated || state.status === 'ready') {
+        // 已经准备完成：直接 attach 已有结果，不再发起任何准备请求。
+        await loadPreparedData()
+        return
+      }
+
+      if (state.status === 'preparing') {
+        // 有任务正在跑（可能是这个组件之前的实例，也可能是别的 tab/刷新
+        // 前留下的）：不发 POST /prepare，attach 到既有进度。
+        attachToPreparingSimulation()
+        return
+      }
+    }
+  } catch (err) {
+    if (!isMounted) return
+
+    // 区分"网络/后端 5xx 这类临时性错误"和"这模拟从来没准备过"（后端通常
+    // 用 404 表示）。前者如果悄悄当成"从未准备"直接 startPrepareSimulation，
+    // 等于把一个可能还在跑的准备任务错误地重新开一次；后者才是真的可以
+    // 当"从未准备"处理。
+    const isTransientError = !err.response || err.response?.status >= 500
+    if (isTransientError) {
+      handlePrepareFailure(err.message)
+      return
+    }
+
+    addLog(t('log.checkStatusFailed', { error: err.message }))
+    // 状态查询本身失败（非临时性），退回原来的行为：正常发起准备请求（prepare
+    // 接口内部还有一层 already_prepared 检测兜底)。
   }
+
+  if (!isMounted) return
+
+  // 从未准备过 / 状态查询失败：正常走原来的启动流程。
+  startPrepareSimulation()
 })
 
 onUnmounted(() => {
+  isMounted = false
   stopPolling()
   stopProfilesPolling()
   stopConfigPolling()
