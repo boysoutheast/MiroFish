@@ -88,6 +88,12 @@
             <span class="action-bar-title">{{ $t('step5.interactiveTools') }}</span>
             <span class="action-bar-subtitle mono">{{ $t('step5.agentsAvailable', { count: profiles.length }) }}</span>
           </div>
+          <a
+            v-if="reportId"
+            class="tab-pill download-pill"
+            :href="`/api/report/${reportId}/download`"
+            download
+          >{{ $t('step4.downloadReport') }}</a>
         </div>
           <div class="action-bar-tabs">
             <button 

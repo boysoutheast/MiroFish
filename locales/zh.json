@@ -215,6 +215,7 @@
   },
   "step4": {
     "generatingSection": "正在生成{title}...",
+    "downloadReport": "下载报告",
     "goToInteraction": "进入深度互动",
     "waitingForReportAgent": "Waiting for Report Agent...",
     "collapse": "收起 ▲",

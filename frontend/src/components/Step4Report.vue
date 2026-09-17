@@ -10,6 +10,12 @@
             <div class="report-meta">
               <span class="report-tag">Prediction Report</span>
               <span class="report-id">ID: {{ reportId || 'REF-2024-X92' }}</span>
+              <a
+                v-if="reportId"
+                class="action-btn download-report-link"
+                :href="`/api/report/${reportId}/download`"
+                download
+              >{{ t('step4.downloadReport') }}</a>
             </div>
             <h1 class="main-title">{{ reportOutline.title }}</h1>
             <p class="sub-title">{{ reportOutline.summary }}</p>
@@ -2387,6 +2393,11 @@ watch(() => props.reportId, (newId) => {
   color: #9CA3AF;
   font-weight: 500;
   letter-spacing: 0.02em;
+}
+
+.download-report-link {
+  margin-left: auto;
+  text-decoration: none;
 }
 
 .main-title {
