@@ -1210,16 +1210,20 @@ input:checked + .slider:before {
   word-break: break-word;
 }
 
-/* Building hint */
+/* Building hint - small corner badge, top-left (mirrors .edge-labels-toggle's top:60/right:20
+   on the opposite side). NOT bottom-left: .graph-legend sits there (bottom:24,left:24) and its
+   height grows unboundedly with entity-type count, so stacking above it risks collision as data
+   changes. NOT bottom-right/top-right: .detail-panel (top:60,right:20) and .edge-labels-toggle
+   (top:60,right:20) already occupy that side. top:60/left:20 stays below .panel-header (~64px
+   tall) and is otherwise empty. */
 .graph-building-hint {
   position: absolute;
-  bottom: 160px; /* Moved up from 80px */
-  left: 50%;
-  transform: translateX(-50%);
+  top: 60px;
+  left: 20px;
   background: rgba(0, 0, 0, 0.65);
   backdrop-filter: blur(8px);
   color: #fff;
-  padding: 10px 20px;
+  padding: 6px 14px;
   border-radius: 30px;
   font-size: 13px;
   display: flex;
