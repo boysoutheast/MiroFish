@@ -2,7 +2,10 @@
   <div class="process-page">
     <!-- 顶部导航栏 -->
     <nav class="navbar">
-      <div class="nav-brand" @click="goHome">MIROFISH</div>
+      <div class="nav-brand" @click="goHome">
+        <span class="nav-brand-name">Kanzen AI Panelist</span>
+        <span class="nav-brand-credit">by MiroFish</span>
+      </div>
       
       <!-- 中间步骤指示器 -->
       <div class="nav-center">
@@ -1130,15 +1133,28 @@ onUnmounted(() => {
 }
 
 .nav-brand {
-  font-size: 1rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
   cursor: pointer;
   transition: opacity 0.2s;
 }
 
 .nav-brand:hover {
   opacity: 0.8;
+}
+
+.nav-brand-name {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.nav-brand-credit {
+  font-size: 0.6rem;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  color: #999;
 }
 
 .nav-center {

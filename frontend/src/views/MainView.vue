@@ -3,7 +3,10 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">MIROFISH</div>
+        <div class="brand" @click="router.push('/')">
+          <span class="brand-name">Kanzen AI Panelist</span>
+          <span class="brand-credit">by MiroFish</span>
+        </div>
       </div>
       
       <div class="header-center">
@@ -448,11 +451,25 @@ onUnmounted(() => {
 }
 
 .brand {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+  cursor: pointer;
+}
+
+.brand-name {
   font-family: 'JetBrains Mono', monospace;
   font-weight: 800;
   font-size: 18px;
   letter-spacing: 1px;
-  cursor: pointer;
+}
+
+.brand-credit {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 500;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: #999;
 }
 
 .view-switcher {

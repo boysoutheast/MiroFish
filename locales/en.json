@@ -556,6 +556,7 @@
     "reportGenTaskStarted": "✓ Report generation task started: {reportId}",
     "reportGenFailed": "✗ Failed to start report generation: {error}",
     "reportGenException": "✗ Report generation error: {error}",
+    "reportGenRetrying": "Server is busy, retrying in {seconds}s... (attempt {attempt}/{max})",
     "step5Init": "Step 5 deep interaction initialized",
     "selectChatTarget": "Selected chat target: {name}",
     "sendFailed": "Send failed: {error}",

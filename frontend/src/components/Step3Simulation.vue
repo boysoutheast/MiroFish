@@ -114,7 +114,7 @@
         <button
           class="action-btn primary"
           :disabled="phase !== 2 || isGeneratingReport"
-          @click="handleNextStep"
+          @click="() => handleNextStep()"
         >
           <span v-if="isGeneratingReport" class="loading-spinner-small"></span>
           {{ isGeneratingReport ? $t('step3.generatingReportBtn') : $t('step3.startGenerateReportBtn') }}
@@ -764,37 +764,70 @@ const formatActionTime = (timestamp) => {
   }
 }
 
-const handleNextStep = async () => {
+// 报告生成失败时的自动重试上限和退避延迟。只对"临时性"错误（网络/超时/5xx）
+// 生效——真正的失败（后端明确 400 等）不重试，重试也没用，只会让用户多等。
+const REPORT_GEN_MAX_ATTEMPTS = 3
+const REPORT_GEN_RETRY_DELAY_MS = 3000
+
+const handleNextStep = async (attempt = 1) => {
   if (!props.simulationId) {
     addLog(t('log.errorMissingSimId'))
     return
   }
 
-  if (isGeneratingReport.value) {
-    addLog(t('log.reportRequestSent'))
-    return
+  if (attempt === 1) {
+    if (isGeneratingReport.value) {
+      addLog(t('log.reportRequestSent'))
+      return
+    }
+
+    isGeneratingReport.value = true
+    addLog(t('log.startingReportGen'))
   }
-  
-  isGeneratingReport.value = true
-  addLog(t('log.startingReportGen'))
-  
+
   try {
     const res = await generateReport({
       simulation_id: props.simulationId,
       force_regenerate: true
     })
-    
+
+    if (!isMounted) return
+
     if (res.success && res.data) {
       const reportId = res.data.report_id
       addLog(t('log.reportGenTaskStarted', { reportId }))
-      
+
       // 跳转到报告页面
       router.push({ name: 'Report', params: { reportId } })
     } else {
+      // 后端明确回了失败（不是异常）——这是definitif错误，不重试。
       addLog(t('log.reportGenFailed', { error: res.error || t('common.unknownError') }))
       isGeneratingReport.value = false
     }
   } catch (err) {
+    if (!isMounted) return
+
+    // 同一套判断标准：!err.response 或 5xx 视为临时性错误（网络抖动/超时/
+    // 后端部署中短暂不可用），值得自动重试；其它（如 4xx）是definitif错误，
+    // 重试没有意义，直接把原始错误展示给用户。
+    const isTransientError = !err.response || err.response?.status >= 500
+
+    if (isTransientError && attempt < REPORT_GEN_MAX_ATTEMPTS) {
+      addLog(t('log.reportGenRetrying', {
+        seconds: Math.round(REPORT_GEN_RETRY_DELAY_MS / 1000),
+        attempt,
+        max: REPORT_GEN_MAX_ATTEMPTS
+      }))
+
+      // isGeneratingReport 保持 true——按钮继续禁用，避免用户在自动重试
+      // 期间又手动点一次，叠加出并发请求。
+      await new Promise((resolve) => setTimeout(resolve, REPORT_GEN_RETRY_DELAY_MS))
+      if (!isMounted) return
+
+      await handleNextStep(attempt + 1)
+      return
+    }
+
     addLog(t('log.reportGenException', { error: err.message }))
     isGeneratingReport.value = false
   }
