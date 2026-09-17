@@ -54,8 +54,13 @@
       </div>
     </div>
 
+    <!-- redirect 判定中：不渲染主内容区，避免 Step2 闪现 + Step2EnvSetup 提前挂载打 API -->
+    <div v-if="isCheckingRedirect" class="redirect-checking">
+      {{ $t('common.loading') }}
+    </div>
+
     <!-- Main Content Area -->
-    <main class="content-area">
+    <main v-else class="content-area">
       <!-- Left Panel: Graph -->
       <div class="panel-wrapper left" :style="leftPanelStyle">
         <GraphPanel
@@ -93,6 +98,7 @@ import { getProject, getGraphData } from '../api/graph'
 import { getSimulation, stopSimulation, getEnvStatus, closeSimulationEnv } from '../api/simulation'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 import { useI18n } from 'vue-i18n'
+import { getSimulationProgress, isRunnerAlive } from '../utils/simulationProgress'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -115,6 +121,7 @@ const systemLogs = ref([])
 const currentStatus = ref('processing') // processing | completed | error
 const runningSimDetected = ref(false) // Step2 挂载时检测到有模拟还在跑（只读检测，不自动停）
 const isStoppingRunningSim = ref(false) // 横条 Stop 按钮的 busy 状态，防止连点两次触发两轮 stop
+const isCheckingRedirect = ref(true) // redirect 判定进行中：主内容区（含 Step2EnvSetup）先不挂载，避免闪现 + 提前打 API
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -355,8 +362,60 @@ const refreshGraph = () => {
   }
 }
 
+/**
+ * 根据模拟真实状态决定要不要把用户从 Step2 转走。
+ * - 已有 report_id → 直接去 Report，跳过所有中间步骤
+ * - 没有 report 但在跑/跑过一半 → 去 Step3（SimulationRun），别拽回 Step2
+ * - 真的还没开始 → 留在 Step2，行为不变
+ * 检测失败（网络/异常）时不猜测，留在 Step2（旧行为），只记录日志。
+ * @returns {boolean} true 表示已经 redirect 走了，调用方不该再继续走 Step2 的初始化
+ */
+const redirectByRealStatus = async () => {
+  if (!currentSimulationId.value) {
+    isCheckingRedirect.value = false
+    return false
+  }
+
+  try {
+    const simRes = await getSimulation(currentSimulationId.value)
+    if (!simRes.success || !simRes.data) {
+      isCheckingRedirect.value = false
+      return false
+    }
+
+    const simData = simRes.data
+
+    if (simData.report_id) {
+      router.push({ name: 'Report', params: { reportId: simData.report_id } })
+      return true
+    }
+
+    if (
+      getSimulationProgress(simData) === 'in-progress' ||
+      getSimulationProgress(simData) === 'completed' ||
+      isRunnerAlive(simData.runner_status)
+    ) {
+      router.push({ name: 'SimulationRun', params: { simulationId: currentSimulationId.value } })
+      return true
+    }
+
+    isCheckingRedirect.value = false
+    return false
+  } catch (err) {
+    // 检测异常 ≠ 该转走，留在 Step2 是安全的旧行为，不能拿错误当路由信号
+    console.warn('检查模拟真实状态失败，留在 Step2:', err)
+    addLog(t('log.detectRunningSimFailed', { error: err.message }))
+    isCheckingRedirect.value = false
+    return false
+  }
+}
+
 onMounted(async () => {
   addLog(t('log.simViewInit'))
+
+  // 先确认真实状态，该转走的（已有报告 / 正在跑）在这里就转走，别让 Step2 先渲染出来
+  const redirected = await redirectByRealStatus()
+  if (redirected) return
 
   // 只读检测有没有模拟还在跑，决定要不要显示横条——不自动停任何东西
   await detectRunningSimulation()
@@ -494,6 +553,15 @@ onMounted(async () => {
 .status-indicator.error .dot { background: #F44336; }
 
 @keyframes pulse { 50% { opacity: 0.5; } }
+
+.redirect-checking {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #999;
+  font-size: 13px;
+}
 
 /* Content */
 .content-area {
