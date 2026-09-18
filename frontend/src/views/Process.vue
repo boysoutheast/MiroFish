@@ -4,7 +4,6 @@
     <nav class="navbar">
       <div class="nav-brand" @click="goHome">
         <span class="nav-brand-name">Kanzen AI Panelist</span>
-        <span class="nav-brand-credit">by MiroFish</span>
       </div>
       
       <!-- 中间步骤指示器 -->
@@ -1148,13 +1147,6 @@ onUnmounted(() => {
   font-size: 1rem;
   font-weight: 700;
   letter-spacing: 0.1em;
-}
-
-.nav-brand-credit {
-  font-size: 0.6rem;
-  font-weight: 500;
-  letter-spacing: 0.05em;
-  color: #999;
 }
 
 .nav-center {
