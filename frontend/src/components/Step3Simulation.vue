@@ -1021,7 +1021,9 @@ onUnmounted(() => {
   align-items: center;
   border-bottom: 1px solid #EAEAEA;
   z-index: 10;
-  height: 64px;
+  min-height: 64px;
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 
 .status-group {
@@ -1041,6 +1043,7 @@ onUnmounted(() => {
   opacity: 0.7;
   transition: all 0.3s;
   min-width: 140px;
+  flex-shrink: 0;
   position: relative;
   cursor: pointer;
 }
@@ -1178,6 +1181,20 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+  overflow-x: auto;
+  /* Kasus iframe SANGAT sempit: scrollbar default browser sembunyi
+     sampai di-hover, jadi tombol yang keluar viewport tetap kelihatan
+     "nggak ada" walau sebenarnya bisa di-scroll. Paksa selalu tampak. */
+  scrollbar-width: thin;
+}
+
+.action-controls::-webkit-scrollbar {
+  height: 6px;
+}
+
+.action-controls::-webkit-scrollbar-thumb {
+  background: #CCC;
+  border-radius: 3px;
 }
 
 /* Action Button */
@@ -1194,6 +1211,7 @@ onUnmounted(() => {
   transition: all 0.2s ease;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  flex-shrink: 0;
 }
 
 .action-btn.primary {
