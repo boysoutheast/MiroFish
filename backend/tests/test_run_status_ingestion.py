@@ -78,5 +78,47 @@ def test_run_status_ingestion_reports_active_updater_stats(monkeypatch):
         assert ingestion["total_activities"] == 42
         assert ingestion["skipped_count"] == 5
         assert ingestion["failed_count"] == 1
+        assert ingestion["buffered_count"] == 0
+    finally:
+        _cleanup(simulation_id)
+
+
+def test_run_status_ingestion_reports_buffered_count(monkeypatch):
+    simulation_id = "sim_ingest_buffered"
+    _register_run_state(simulation_id)
+
+    fixture_stats = {
+        "graph_id": "graph_x",
+        "batch_size": 5,
+        "total_activities": 175,
+        "batches_sent": 35,
+        "items_sent": 175,
+        "failed_count": 0,
+        "pending_episode_count": 0,
+        "skipped_count": 0,
+        "queue_size": 0,
+        "buffer_sizes": {"twitter": 3, "reddit": 1},
+        "running": True,
+    }
+
+    class FakeUpdater:
+        def get_stats(self):
+            return fixture_stats
+
+    monkeypatch.setattr(
+        ZepGraphMemoryManager, "get_updater", classmethod(lambda cls, sim_id: FakeUpdater())
+    )
+
+    try:
+        app = create_app()
+        app.config.update(TESTING=True)
+        client = app.test_client()
+
+        response = client.get(f"/api/simulation/{simulation_id}/run-status")
+
+        assert response.status_code == 200
+        ingestion = response.json["data"]["ingestion"]
+        assert ingestion is not None
+        assert ingestion["buffered_count"] == 4
     finally:
         _cleanup(simulation_id)

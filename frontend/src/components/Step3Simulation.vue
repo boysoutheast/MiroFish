@@ -131,7 +131,7 @@
     >
       <template v-if="runStatus.ingestion && !isIngestionDrained(runStatus.ingestion)">
         <span class="ingestion-text">
-          {{ $t('step3.ingestionProgress', { itemsSent: runStatus.ingestion.items_sent, total: runStatus.ingestion.total_activities, remaining: ingestionRemaining }) }}
+          {{ $t('step3.ingestionProgress', { itemsSent: runStatus.ingestion.items_sent, total: ingestionTotalDisplay, remaining: ingestionRemaining }) }}
         </span>
         <span class="ingestion-eta">{{ ingestionEtaText }}</span>
       </template>
@@ -407,8 +407,15 @@ const MAX_INGESTION_SAMPLES = 10
 const ingestionSamples = ref([])
 
 // ingestion === null（没有活跃 updater）视为已排空/安全——不是"还没检查"。
+// buffered_count 必须一起检查：还卡在 per-platform buffer（未凑够 BATCH_SIZE）
+// 的条目既不在 queue_size 也不在 pending_episode_count 里，忽略它会让"已完成"
+// 判定过早——数据其实还没真正落地到 Zep。
 const isIngestionDrained = (ingestion) => {
-  return !ingestion || (ingestion.queue_size === 0 && ingestion.pending_episode_count === 0)
+  return !ingestion || (
+    ingestion.queue_size === 0 &&
+    ingestion.pending_episode_count === 0 &&
+    (ingestion.buffered_count || 0) === 0
+  )
 }
 
 // rounds 是否已经跑完（两个平台共用的 current_round/total_rounds，与 attach 逻辑保持一致）
@@ -423,7 +430,7 @@ const recordIngestionSample = (ingestion) => {
     ingestionSamples.value = []
     return
   }
-  const remaining = ingestion.queue_size + ingestion.pending_episode_count
+  const remaining = ingestion.queue_size + ingestion.pending_episode_count + (ingestion.buffered_count || 0)
   const next = [...ingestionSamples.value, { timestamp: Date.now(), remaining }]
   ingestionSamples.value = next.length > MAX_INGESTION_SAMPLES
     ? next.slice(next.length - MAX_INGESTION_SAMPLES)
@@ -434,7 +441,18 @@ const recordIngestionSample = (ingestion) => {
 const ingestionRemaining = computed(() => {
   const ingestion = runStatus.value.ingestion
   if (!ingestion) return null
-  return ingestion.queue_size + ingestion.pending_episode_count
+  return ingestion.queue_size + ingestion.pending_episode_count + (ingestion.buffered_count || 0)
+})
+
+// 展示用的"总数"：故意不用 runStatus.ingestion.total_activities（MiroFish 上游的定义），
+// 因为缓冲区里还没 flush 的条目在上游还不算"正式"入账，会导致
+// total_activities < itemsSent + remaining，显示出自相矛盾的数字
+// （例如 175/179 saved + 35 left in queue，175+35≠179）。
+// 这里改成从我们已知的两个分量算出来，itemsSent + remaining 天然自洽。
+const ingestionTotalDisplay = computed(() => {
+  const ingestion = runStatus.value.ingestion
+  if (!ingestion) return null
+  return ingestion.items_sent + (ingestionRemaining.value || 0)
 })
 
 // 真实吞吐量（条/秒），来自样本历史，不是瞎猜

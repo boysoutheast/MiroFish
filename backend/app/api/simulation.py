@@ -1919,6 +1919,12 @@ def get_run_status(simulation_id: str):
                 "total_activities": stats["total_activities"],
                 "skipped_count": stats["skipped_count"],
                 "failed_count": stats["failed_count"],
+                # Total items still sitting in per-platform buffers, waiting for
+                # BATCH_SIZE to fill before being flushed to the queue. Without
+                # this, queue_size + pending_episode_count undercounts the items
+                # that exist but haven't been flushed yet, breaking the frontend's
+                # "X saved / Y left in queue" math.
+                "buffered_count": sum(stats["buffer_sizes"].values()),
             }
         else:
             data["ingestion"] = None
