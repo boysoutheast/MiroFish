@@ -123,6 +123,25 @@
       </div>
     </div>
 
+    <!-- Ingestion progress / safe-to-stop banner -->
+    <div
+      v-if="showIngestionStatus"
+      class="ingestion-status"
+      :class="{ 'ingestion-status--safe': isIngestionDrained(runStatus.ingestion) }"
+    >
+      <template v-if="runStatus.ingestion && !isIngestionDrained(runStatus.ingestion)">
+        <span class="ingestion-text">
+          {{ $t('step3.ingestionProgress', { itemsSent: runStatus.ingestion.items_sent, total: runStatus.ingestion.total_activities, remaining: ingestionRemaining }) }}
+        </span>
+        <span class="ingestion-eta">{{ ingestionEtaText }}</span>
+      </template>
+      <template v-else>
+        <span class="ingestion-text ingestion-text--safe">
+          {{ $t('step3.ingestionSafe') }}
+        </span>
+      </template>
+    </div>
+
     <!-- Main Content: Dual Timeline -->
     <div class="main-content-area" ref="scrollContainer">
       <!-- Timeline Header -->
@@ -381,6 +400,83 @@ const redditElapsedTime = computed(() => {
   return formatElapsedTime(runStatus.value.reddit_current_round || 0)
 })
 
+// --- Zep ingestion 排空进度（决定 Stop/Generate Report 是否"真的"安全点） ---
+
+const MAX_INGESTION_SAMPLES = 10
+// { timestamp: number(ms), remaining: number } 的历史样本，用来算真实吞吐量
+const ingestionSamples = ref([])
+
+// ingestion === null（没有活跃 updater）视为已排空/安全——不是"还没检查"。
+const isIngestionDrained = (ingestion) => {
+  return !ingestion || (ingestion.queue_size === 0 && ingestion.pending_episode_count === 0)
+}
+
+// rounds 是否已经跑完（两个平台共用的 current_round/total_rounds，与 attach 逻辑保持一致）
+const isRoundsDone = (data) => {
+  return !!data && data.total_rounds > 0 && data.current_round >= data.total_rounds
+}
+
+const recordIngestionSample = (ingestion) => {
+  if (!ingestion) {
+    // 没有活跃 updater 了：历史样本失去意义，清空避免下次重新出现 updater 时
+    // 用旧样本算出离谱的吞吐量。
+    ingestionSamples.value = []
+    return
+  }
+  const remaining = ingestion.queue_size + ingestion.pending_episode_count
+  const next = [...ingestionSamples.value, { timestamp: Date.now(), remaining }]
+  ingestionSamples.value = next.length > MAX_INGESTION_SAMPLES
+    ? next.slice(next.length - MAX_INGESTION_SAMPLES)
+    : next
+}
+
+// 剩余待落地条数：queue_size（还没送去 Zep）+ pending_episode_count（送了，等 Zep 确认）
+const ingestionRemaining = computed(() => {
+  const ingestion = runStatus.value.ingestion
+  if (!ingestion) return null
+  return ingestion.queue_size + ingestion.pending_episode_count
+})
+
+// 真实吞吐量（条/秒），来自样本历史，不是瞎猜
+const ingestionThroughputPerSecond = computed(() => {
+  const samples = ingestionSamples.value
+  if (samples.length < 2) return null
+  const first = samples[0]
+  const last = samples[samples.length - 1]
+  const elapsedSeconds = (last.timestamp - first.timestamp) / 1000
+  if (elapsedSeconds <= 0) return null
+  const processed = first.remaining - last.remaining
+  if (processed <= 0) return null
+  return processed / elapsedSeconds
+})
+
+const formatEtaSeconds = (seconds) => {
+  const totalSeconds = Math.max(0, Math.round(seconds))
+  const minutes = Math.floor(totalSeconds / 60)
+  const secs = totalSeconds % 60
+  return minutes > 0 ? `~${minutes}m ${secs}s` : `~${secs}s`
+}
+
+// 只有吞吐量确实 > 0 且样本足够时才给出估计秒数；否则老实说"还在算"，
+// 不拍一个 NaN/Infinity/瞎猜的数字给 Boy。
+const ingestionEtaText = computed(() => {
+  const remaining = ingestionRemaining.value
+  if (remaining === null || remaining <= 0) return ''
+  const throughput = ingestionThroughputPerSecond.value
+  if (!throughput || throughput <= 0 || !isFinite(throughput)) return t('step3.ingestionEtaCalculating')
+  const estimatedSecondsRemaining = remaining / throughput
+  if (!isFinite(estimatedSecondsRemaining)) return t('step3.ingestionEtaCalculating')
+  return t('step3.ingestionEtaDone', { eta: formatEtaSeconds(estimatedSecondsRemaining) })
+})
+
+// Banner/progress cuma muncul kalau rounds sudah selesai TAPI belum resmi
+// phase 2 (completed). ingestion === null itu KONDISI PALING AMAN
+// (lihat isIngestionDrained) — jadi banner TIDAK boleh mensyaratkan
+// ingestion truthy, atau justru hilang pas paling aman ditampilkan.
+const showIngestionStatus = computed(() => {
+  return isRoundsDone(runStatus.value) && phase.value !== 2
+})
+
 // Methods
 const addLog = (msg) => {
   emit('add-log', msg)
@@ -394,6 +490,7 @@ const resetAllState = () => {
   actionIds.value = new Set()
   prevTwitterRound.value = 0
   prevRedditRound.value = 0
+  ingestionSamples.value = []
   startError.value = null
   isStarting.value = false
   isStopping.value = false
@@ -546,6 +643,7 @@ const attachToRunningSimulation = async (statusData = null) => {
     if (!data) return false
 
     runStatus.value = data
+    recordIngestionSample(data.ingestion)
     prevTwitterRound.value = data.twitter_current_round || 0
     prevRedditRound.value = data.reddit_current_round || 0
 
@@ -557,7 +655,11 @@ const attachToRunningSimulation = async (statusData = null) => {
     }
 
     const isTerminal = data.runner_status === 'completed' || data.runner_status === 'stopped'
-    const roundsDone = data.total_rounds > 0 && data.current_round >= data.total_rounds
+    // roundsDone HARUS digabung sama ingestion-drained: kalau rounds sudah
+    // habis tapi masih ada antrean/pending ke Zep, belum boleh dianggap
+    // selesai (phase 2) — data belum tentu aman tersimpan. ingestion === null
+    // (nol ada updater aktif) dianggap aman, nol ada proses ingestion tersisa.
+    const roundsDone = isRoundsDone(data) && isIngestionDrained(data.ingestion)
 
     if (isTerminal || roundsDone) {
       phase.value = 2
@@ -619,9 +721,10 @@ const fetchRunStatus = async () => {
     
     if (res.success && res.data) {
       const data = res.data
-      
+
       runStatus.value = data
-      
+      recordIngestionSample(data.ingestion)
+
       // 分别检测各平台的轮次变化并输出日志
       if (data.twitter_current_round > prevTwitterRound.value) {
         addLog(`[Plaza] R${data.twitter_current_round}/${data.total_rounds} | T:${data.twitter_simulated_hours || 0}h | A:${data.twitter_actions_count}`)
@@ -1116,6 +1219,36 @@ onUnmounted(() => {
 .action-btn:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+}
+
+/* --- Ingestion progress / safe-to-stop banner --- */
+.ingestion-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 24px;
+  font-size: 12px;
+  background: #FAFAFA;
+  border-bottom: 1px solid #EAEAEA;
+  color: #666;
+  flex-shrink: 0;
+}
+
+.ingestion-status--safe {
+  background: #F2FAF6;
+  border-bottom-color: #BFE3D0;
+  color: #1A936F;
+}
+
+.ingestion-eta {
+  font-family: 'JetBrains Mono', monospace;
+  color: #999;
+  flex-shrink: 0;
+}
+
+.ingestion-text--safe {
+  font-weight: 600;
 }
 
 /* --- Main Content Area --- */

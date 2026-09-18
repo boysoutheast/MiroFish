@@ -217,7 +217,11 @@
     "generatingReportBtn": "启动中...",
     "stopSimulationBtn": "停止推演",
     "restartBtn": "重新开始",
-    "backToStep2Btn": "返回Step2"
+    "backToStep2Btn": "返回Step2",
+    "ingestionProgress": "正在保存结果到记忆：已保存 {itemsSent}/{total}，队列中还剩 {remaining} 条。",
+    "ingestionSafe": "数据已安全保存 —— 现在可以放心点击停止模拟然后生成报告。",
+    "ingestionEtaCalculating": "正在计算预估时间...",
+    "ingestionEtaDone": "预计完成 {eta}"
   },
   "step4": {
     "generatingSection": "正在生成{title}...",

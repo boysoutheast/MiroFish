@@ -217,7 +217,11 @@
     "generatingReportBtn": "Starting...",
     "stopSimulationBtn": "Stop Simulation",
     "restartBtn": "Restart",
-    "backToStep2Btn": "Back to Step 2"
+    "backToStep2Btn": "Back to Step 2",
+    "ingestionProgress": "Saving results to memory: {itemsSent}/{total} saved, {remaining} left in queue.",
+    "ingestionSafe": "Data is safely saved — it's now safe to click Stop Simulation then Generate Report.",
+    "ingestionEtaCalculating": "calculating estimate...",
+    "ingestionEtaDone": "estimated completion {eta}"
   },
   "step4": {
     "generatingSection": "Generating {title}...",

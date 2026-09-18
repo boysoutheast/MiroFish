@@ -58,3 +58,6 @@ backend/uploads/
 
 # Docker 数据
 data/
+
+# impeccable hook cache (path lokal + session id, bukan buat repo)
+.impeccable/
