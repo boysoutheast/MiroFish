@@ -673,19 +673,21 @@ const attachToRunningSimulation = async (statusData = null) => {
     }
 
     const isTerminal = data.runner_status === 'completed' || data.runner_status === 'stopped'
-    // roundsDone HARUS digabung sama ingestion-drained: kalau rounds sudah
-    // habis tapi masih ada antrean/pending ke Zep, belum boleh dianggap
-    // selesai (phase 2) — data belum tentu aman tersimpan. ingestion === null
-    // (nol ada updater aktif) dianggap aman, nol ada proses ingestion tersisa.
-    const roundsDone = isRoundsDone(data) && isIngestionDrained(data.ingestion)
 
-    if (isTerminal || roundsDone) {
+    if (isTerminal) {
       phase.value = 2
       addLog(t('log.attachSimCompleted'))
       emit('update-status', 'completed')
       return true
     }
 
+    // Rounds abis + ingestion drained BUKAN pengganti isTerminal — backend
+    // generate_report() genuinely butuh runner_status COMPLETED/STOPPED, bukan
+    // tebakan client. Auto-unlock di sini bikin Generate Report aktif tapi
+    // gagal 409, SEKALIGUS mematikan tombol Stop (phase!==1) — user kejebak.
+    // Tetap phase=1 (Stop tetap aktif), banner "aman klik Stop" tetap muncul
+    // lewat showIngestionStatus/isIngestionDrained yang sudah ada (independen
+    // dari fungsi ini).
     phase.value = 1
     emit('update-status', 'processing')
     startStatusPolling()
