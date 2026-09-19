@@ -207,6 +207,57 @@ IPC_COMMANDS_DIR = "ipc_commands"
 IPC_RESPONSES_DIR = "ipc_responses"
 ENV_STATUS_FILE = "env_status.json"
 
+# 单轮 env.step() 超时时间（秒）。防止 LLM API 挂起导致某一轮永远不返回，
+# 进程无限期挂起且 run_state 一直停在 "running"（T4: 按项目付费保障）。
+# 默认 10 分钟，属于 PRD 层决策，不在此文件内自行调整。
+ROUND_TIMEOUT_SECONDS = 600
+
+
+async def _run_env_step_with_timeout(
+    env,
+    actions: Dict[Any, Any],
+    *,
+    platform: str,
+    round_num: int,
+    action_logger: Optional[PlatformActionLogger] = None,
+    main_logger: Optional[SimulationLogManager] = None,
+    timeout_seconds: float = ROUND_TIMEOUT_SECONDS,
+) -> None:
+    """
+    包一层 asyncio.wait_for 执行 env.step()，防止某一轮模拟因 LLM API 挂起
+    而永远不返回、不抛异常、run_state 却一直停在 "running"。
+
+    超时发生时：
+    - 写入 action_logger 的 round_timeout 事件（供后端/监控读取）
+    - 写入 main_logger 的 error 日志
+    - 重新抛出 asyncio.TimeoutError，让调用方的模拟循环明确终止
+      （不会静默继续），并让整个 Python 进程以非 0 退出码结束——
+      simulation_runner.py 里已有的监控机制靠这个退出码把状态判定为 FAILED。
+
+    Args:
+        env: OASIS 环境实例（result.env）
+        actions: 传给 env.step() 的动作字典
+        platform: "twitter" 或 "reddit"，仅用于日志文案
+        round_num: 当前轮次（初始事件阶段传 0）
+        action_logger: 该平台的动作日志记录器
+        main_logger: 主模拟日志管理器
+        timeout_seconds: 超时秒数，默认 ROUND_TIMEOUT_SECONDS
+    """
+    try:
+        await asyncio.wait_for(env.step(actions), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        error_msg = (
+            f"[{platform}] Round {round_num} 超时: env.step() 未在 "
+            f"{timeout_seconds} 秒内返回（可能是 LLM API 挂起未响应）"
+        )
+        if action_logger:
+            action_logger.log_round_timeout(round_num, timeout_seconds)
+        if main_logger:
+            main_logger.error(error_msg)
+        print(error_msg)
+        raise
+
+
 class CommandType:
     """命令类型常量"""
     INTERVIEW = "interview"
@@ -333,12 +384,25 @@ class ParallelIPCHandler:
                 action_args={"prompt": prompt}
             )
             actions = {agent: interview_action}
-            await env.step(actions)
-            
+            # Interview 模式下 env.step() 同样可能因 LLM API 挂起而永远不返回。
+            # 复用 round-loop 用的同一个超时 helper，但这里超时是"某次采访失败"，
+            # 不是"整个模拟进程失败"——不能让异常往上冒出去把 IPC 命令循环整个
+            # 打断（那会连累后续所有 interview 命令都收不到响应）。所以在这里
+            # 原地捕获，走跟其它 interview 异常一样的 {"error": ...} 返回路径。
+            await _run_env_step_with_timeout(
+                env, actions,
+                platform=actual_platform, round_num=-1,
+            )
+
             result = self._get_interview_result(agent_id, actual_platform)
             result["platform"] = actual_platform
             return result
-            
+
+        except asyncio.TimeoutError:
+            return {
+                "platform": platform,
+                "error": f"Interview 超时（超过 {ROUND_TIMEOUT_SECONDS} 秒未响应，可能是 LLM API 挂起）",
+            }
         except Exception as e:
             return {"platform": platform, "error": str(e)}
     
@@ -466,8 +530,16 @@ class ParallelIPCHandler:
                         print(f"  警告: 无法获取Twitter Agent {agent_id}: {e}")
                 
                 if twitter_actions:
-                    await self.twitter_env.step(twitter_actions)
-                    
+                    # Sama seperti _interview_single_platform: pakai helper timeout
+                    # yang sama supaya batch interview juga tidak bisa hang selamanya.
+                    # TimeoutError di-reraise oleh helper dan ditangkap oleh
+                    # `except Exception` di bawah, sama seperti kegagalan lain di
+                    # sini -- platform ini di-skip, batch platform lain tetap jalan.
+                    await _run_env_step_with_timeout(
+                        self.twitter_env, twitter_actions,
+                        platform="twitter", round_num=-1,
+                    )
+
                     for interview in twitter_interviews:
                         agent_id = interview.get("agent_id")
                         result = self._get_interview_result(agent_id, "twitter")
@@ -493,8 +565,14 @@ class ParallelIPCHandler:
                         print(f"  警告: 无法获取Reddit Agent {agent_id}: {e}")
                 
                 if reddit_actions:
-                    await self.reddit_env.step(reddit_actions)
-                    
+                    # Sama seperti batch Twitter di atas: pakai helper timeout supaya
+                    # env.step() tidak bisa hang selamanya; TimeoutError ditangkap
+                    # oleh `except Exception` di bawah (skip platform ini saja).
+                    await _run_env_step_with_timeout(
+                        self.reddit_env, reddit_actions,
+                        platform="reddit", round_num=-1,
+                    )
+
                     for interview in reddit_interviews:
                         agent_id = interview.get("agent_id")
                         result = self._get_interview_result(agent_id, "reddit")
@@ -1203,61 +1281,69 @@ async def run_twitter_simulation(
                 pass
         
         if initial_actions:
-            await result.env.step(initial_actions)
+            await _run_env_step_with_timeout(
+                result.env, initial_actions,
+                platform="twitter", round_num=0,
+                action_logger=action_logger, main_logger=main_logger,
+            )
             log_info(f"已发布 {len(initial_actions)} 条初始帖子")
-    
+
     # 记录 round 0 结束
     if action_logger:
         action_logger.log_round_end(0, initial_action_count)
-    
+
     # 主模拟循环
     time_config = config.get("time_config", {})
     total_hours = time_config.get("total_simulation_hours", 72)
     minutes_per_round = time_config.get("minutes_per_round", 30)
     total_rounds = (total_hours * 60) // minutes_per_round
-    
+
     # 如果指定了最大轮数，则截断
     if max_rounds is not None and max_rounds > 0:
         original_rounds = total_rounds
         total_rounds = min(total_rounds, max_rounds)
         if total_rounds < original_rounds:
             log_info(f"轮数已截断: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
-    
+
     start_time = datetime.now()
-    
+
     for round_num in range(total_rounds):
         # 检查是否收到退出信号
         if _shutdown_event and _shutdown_event.is_set():
             if main_logger:
                 main_logger.info(f"收到退出信号，在第 {round_num + 1} 轮停止模拟")
             break
-        
+
         simulated_minutes = round_num * minutes_per_round
         simulated_hour = (simulated_minutes // 60) % 24
         simulated_day = simulated_minutes // (60 * 24) + 1
-        
+
         active_agents = get_active_agents_for_round(
             result.env, config, simulated_hour, round_num
         )
-        
+
         # 无论是否有活跃agent，都记录round开始
         if action_logger:
             action_logger.log_round_start(round_num + 1, simulated_hour)
-        
+
         if not active_agents:
             # 没有活跃agent时也记录round结束（actions_count=0）
             if action_logger:
                 action_logger.log_round_end(round_num + 1, 0)
             continue
-        
+
         actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
-        
+        await _run_env_step_with_timeout(
+            result.env, actions,
+            platform="twitter", round_num=round_num + 1,
+            action_logger=action_logger, main_logger=main_logger,
+        )
+
         # 从数据库获取实际执行的动作并记录
         actual_actions, last_rowid = fetch_new_actions_from_db(
             db_path, last_rowid, agent_names
         )
-        
+
         round_action_count = 0
         for action_data in actual_actions:
             if action_logger:
@@ -1270,23 +1356,23 @@ async def run_twitter_simulation(
                 )
                 total_actions += 1
                 round_action_count += 1
-        
+
         if action_logger:
             action_logger.log_round_end(round_num + 1, round_action_count)
-        
+
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100
             log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
-    
+
     # 注意：不关闭环境，保留给Interview使用
-    
+
     if action_logger:
         action_logger.log_simulation_end(total_rounds, total_actions)
-    
+
     result.total_actions = total_actions
     elapsed = (datetime.now() - start_time).total_seconds()
     log_info(f"模拟循环完成! 耗时: {elapsed:.1f}秒, 总动作: {total_actions}")
-    
+
     return result
 
 
@@ -1402,61 +1488,69 @@ async def run_reddit_simulation(
                 pass
         
         if initial_actions:
-            await result.env.step(initial_actions)
+            await _run_env_step_with_timeout(
+                result.env, initial_actions,
+                platform="reddit", round_num=0,
+                action_logger=action_logger, main_logger=main_logger,
+            )
             log_info(f"已发布 {len(initial_actions)} 条初始帖子")
-    
+
     # 记录 round 0 结束
     if action_logger:
         action_logger.log_round_end(0, initial_action_count)
-    
+
     # 主模拟循环
     time_config = config.get("time_config", {})
     total_hours = time_config.get("total_simulation_hours", 72)
     minutes_per_round = time_config.get("minutes_per_round", 30)
     total_rounds = (total_hours * 60) // minutes_per_round
-    
+
     # 如果指定了最大轮数，则截断
     if max_rounds is not None and max_rounds > 0:
         original_rounds = total_rounds
         total_rounds = min(total_rounds, max_rounds)
         if total_rounds < original_rounds:
             log_info(f"轮数已截断: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
-    
+
     start_time = datetime.now()
-    
+
     for round_num in range(total_rounds):
         # 检查是否收到退出信号
         if _shutdown_event and _shutdown_event.is_set():
             if main_logger:
                 main_logger.info(f"收到退出信号，在第 {round_num + 1} 轮停止模拟")
             break
-        
+
         simulated_minutes = round_num * minutes_per_round
         simulated_hour = (simulated_minutes // 60) % 24
         simulated_day = simulated_minutes // (60 * 24) + 1
-        
+
         active_agents = get_active_agents_for_round(
             result.env, config, simulated_hour, round_num
         )
-        
+
         # 无论是否有活跃agent，都记录round开始
         if action_logger:
             action_logger.log_round_start(round_num + 1, simulated_hour)
-        
+
         if not active_agents:
             # 没有活跃agent时也记录round结束（actions_count=0）
             if action_logger:
                 action_logger.log_round_end(round_num + 1, 0)
             continue
-        
+
         actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
-        
+        await _run_env_step_with_timeout(
+            result.env, actions,
+            platform="reddit", round_num=round_num + 1,
+            action_logger=action_logger, main_logger=main_logger,
+        )
+
         # 从数据库获取实际执行的动作并记录
         actual_actions, last_rowid = fetch_new_actions_from_db(
             db_path, last_rowid, agent_names
         )
-        
+
         round_action_count = 0
         for action_data in actual_actions:
             if action_logger:
@@ -1469,23 +1563,23 @@ async def run_reddit_simulation(
                 )
                 total_actions += 1
                 round_action_count += 1
-        
+
         if action_logger:
             action_logger.log_round_end(round_num + 1, round_action_count)
-        
+
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100
             log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
-    
+
     # 注意：不关闭环境，保留给Interview使用
-    
+
     if action_logger:
         action_logger.log_simulation_end(total_rounds, total_actions)
-    
+
     result.total_actions = total_actions
     elapsed = (datetime.now() - start_time).total_seconds()
     log_info(f"模拟循环完成! 耗时: {elapsed:.1f}秒, 总动作: {total_actions}")
-    
+
     return result
 
 
@@ -1582,11 +1676,59 @@ async def main():
         reddit_result = await run_reddit_simulation(config, simulation_dir, reddit_logger, log_manager, args.max_rounds)
     else:
         # 并行运行（每个平台使用独立的日志记录器）
-        results = await asyncio.gather(
-            run_twitter_simulation(config, simulation_dir, twitter_logger, log_manager, args.max_rounds),
-            run_reddit_simulation(config, simulation_dir, reddit_logger, log_manager, args.max_rounds),
+        # 注意：asyncio.gather() 默认情况下，如果一个任务抛异常（例如 round
+        # 超时），另一个任务不会自动被取消，可能无限期继续跑而挂住整个进程。
+        # 这里显式用 asyncio.wait(..., return_when=FIRST_EXCEPTION)：
+        # 一旦任一平台失败，立刻取消另一个仍在运行的平台，再重新抛出原始异常。
+        twitter_task = asyncio.ensure_future(
+            run_twitter_simulation(config, simulation_dir, twitter_logger, log_manager, args.max_rounds)
         )
-        twitter_result, reddit_result = results
+        reddit_task = asyncio.ensure_future(
+            run_reddit_simulation(config, simulation_dir, reddit_logger, log_manager, args.max_rounds)
+        )
+        tasks = [twitter_task, reddit_task]
+
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+
+        # 两个平台可能"同时"失败（例如两边都在差不多的时刻超时），这种情况下
+        # asyncio.wait 会把两个 task 都放进 done。不能只看第一个就 break——
+        # 那样第二个失败 task 的 .exception() 永远不会被取走，asyncio 会在它被
+        # 垃圾回收时打印 "Task exception was never retrieved" 到 stderr，而且
+        # 第二个平台真正的失败原因（可能跟第一个完全不同，比如一个超时一个是
+        # 别的异常）就直接消失，没人知道。这里改成：把 done 里每一个失败的
+        # task 的 exception 都取出来（.exception() 被调用过，异常就算"被取走"
+        # 了，不会再触发 asyncio 的未取走警告），全部记进日志，最后只重新抛出
+        # 第一个（保留原本"抛一个异常出去终止 main()"的行为）。
+        #
+        # 另外，done 里的 task 也可能是 CANCELLED 状态而不是"有 exception"——
+        # 对 CANCELLED 的 task 调用 .exception() 会直接 raise CancelledError，
+        # 不是 return。如果不先用 task.cancelled() 判断就直接调用，这个
+        # CancelledError 会从 for 循环里逃出去，导致下面清理 pending task 的
+        # 代码整段被跳过，pending 里还在跑的那个平台就再也没人取消/等它了，
+        # 造成 task 泄漏。用 try/finally 保证不管上面出什么状况，pending 的
+        # cancel + gather 清理一定会跑到。
+        errors: List[BaseException] = []
+        try:
+            for task in done:
+                if task.cancelled():
+                    continue
+                task_error = task.exception()
+                if task_error is not None:
+                    errors.append(task_error)
+        finally:
+            if pending:
+                # 一个或多个平台失败（或被取消），取消另一个尚在运行的平台，避免它无限期挂着
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        if errors:
+            for err in errors:
+                log_manager.error(f"并行模拟异常，已终止另一平台的任务: {err}")
+            raise errors[0]
+
+        twitter_result = twitter_task.result()
+        reddit_result = reddit_task.result()
     
     total_elapsed = (datetime.now() - start_time).total_seconds()
     log_manager.info("=" * 60)
