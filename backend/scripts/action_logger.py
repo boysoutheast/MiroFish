@@ -89,6 +89,18 @@ class PlatformActionLogger:
         with open(self.log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry, ensure_ascii=False) + '\n')
     
+    def log_round_timeout(self, round_num: int, timeout_seconds: float):
+        """记录轮次超时（env.step 未在超时时间内返回，例如 LLM API 挂起不响应）"""
+        entry = {
+            "round": round_num,
+            "timestamp": datetime.now().isoformat(),
+            "event_type": "round_timeout",
+            "timeout_seconds": timeout_seconds,
+        }
+
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
     def log_simulation_start(self, config: Dict[str, Any]):
         """记录模拟开始"""
         entry = {
