@@ -270,6 +270,159 @@ def test_force_restart_does_not_continue_while_old_ingestion_is_pending(monkeypa
     assert cleanup_called == []
 
 
+def test_force_restart_blocked_for_completed_simulation(monkeypatch):
+    """T3B1: paid, COMPLETED simulations are permanent records — force=true
+    must never reach cleanup_simulation_logs (which deletes run_state.json,
+    logs, and the simulation DB) once the run finished."""
+    simulation = SimpleNamespace(
+        simulation_id="sim-1",
+        project_id="proj-1",
+        graph_id=None,
+        status=SimulationStatus.COMPLETED,
+    )
+    cleanup_called = []
+    stop_called = []
+    start_called = []
+    monkeypatch.setattr(
+        simulation_api,
+        "SimulationManager",
+        lambda: SimpleNamespace(
+            get_simulation=lambda _simulation_id: simulation,
+            _save_simulation_state=lambda _state: None,
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_api,
+        "_check_simulation_prepared",
+        lambda _simulation_id: (True, {}),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "get_run_state",
+        classmethod(
+            lambda _cls, _simulation_id: SimpleNamespace(
+                runner_status=RunnerStatus.COMPLETED
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_api.ZepGraphMemoryManager,
+        "get_updater",
+        classmethod(lambda _cls, _simulation_id: None),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "stop_simulation",
+        classmethod(lambda _cls, _simulation_id: stop_called.append(True)),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "cleanup_simulation_logs",
+        classmethod(
+            lambda _cls, _simulation_id: cleanup_called.append(True)
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "start_simulation",
+        classmethod(lambda _cls, **_kwargs: start_called.append(True)),
+    )
+
+    app = Flask(__name__)
+    with app.test_request_context(
+        "/api/simulation/start",
+        method="POST",
+        json={"simulation_id": "sim-1", "force": True},
+    ):
+        response, status = simulation_api.start_simulation()
+
+    body = response.get_json()
+    assert status == 409
+    assert body["success"] is False
+    assert "已经完成" in body["error"] or "completed" in body["error"].lower()
+    assert cleanup_called == []
+    assert stop_called == []
+    assert start_called == []
+
+
+@pytest.mark.parametrize("runner_status", [RunnerStatus.STOPPED, RunnerStatus.FAILED])
+def test_force_restart_allowed_for_stopped_or_failed_simulation(
+    monkeypatch, runner_status
+):
+    """T3B1 regression guard: the new COMPLETED lock must not block the
+    existing, already-final product decision that STOPPED/FAILED runs may
+    still be force-restarted."""
+    simulation = SimpleNamespace(
+        simulation_id="sim-1",
+        project_id="proj-1",
+        graph_id=None,
+        status=SimulationStatus.STOPPED,
+    )
+    cleanup_called = []
+    start_called = []
+    fake_new_run_state = SimpleNamespace(
+        to_dict=lambda: {"simulation_id": "sim-1", "runner_status": "running"}
+    )
+    monkeypatch.setattr(
+        simulation_api,
+        "SimulationManager",
+        lambda: SimpleNamespace(
+            get_simulation=lambda _simulation_id: simulation,
+            _save_simulation_state=lambda _state: None,
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_api,
+        "_check_simulation_prepared",
+        lambda _simulation_id: (True, {}),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "get_run_state",
+        classmethod(
+            lambda _cls, _simulation_id: SimpleNamespace(
+                runner_status=runner_status
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_api.ZepGraphMemoryManager,
+        "get_updater",
+        classmethod(lambda _cls, _simulation_id: None),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "cleanup_simulation_logs",
+        classmethod(
+            lambda _cls, _simulation_id: cleanup_called.append(True)
+            or {"success": True}
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "start_simulation",
+        classmethod(
+            lambda _cls, **_kwargs: start_called.append(True)
+            or fake_new_run_state
+        ),
+    )
+
+    app = Flask(__name__)
+    with app.test_request_context(
+        "/api/simulation/start",
+        method="POST",
+        json={"simulation_id": "sim-1", "force": True},
+    ):
+        result = simulation_api.start_simulation()
+
+    response, status = result if isinstance(result, tuple) else (result, 200)
+    body = response.get_json()
+    assert status == 200
+    assert body["success"] is True
+    assert cleanup_called == [True]
+    assert start_called == [True]
+
+
 def test_monitor_start_failure_terminates_the_spawned_process(monkeypatch, tmp_path):
     simulation_id = "sim-start-failure"
     sim_dir = tmp_path / "runs" / simulation_id
