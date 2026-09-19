@@ -28,11 +28,25 @@ export function getSimulationProgress(sim) {
 /**
  * 判断后端 runner_status 是否代表"进程还活着"（可以 attach 上去继续轮询），
  * 而不需要重新 start。
+ *
+ * 'crashed' 算进来是有意的（T3F2）：进程本身死了，但后端正在自动重试同一个
+ * simulation_id，不是一个可以重新 start 的 idle 状态——attach 上去继续轮询
+ * 才能等到重试的结果，重新 start 只会跟后端的自动重试打架。
+ * 'needs_attention' 不算——那是重试也失败后的终态，不会自己恢复，不属于
+ * "还活着"；它在 Step3Simulation.vue 的 onMounted 里单独判断是否要 attach
+ * （为了显示终态提示，而不是盲目重新 start），语义上跟这里的"活着"不一样。
+ *
+ * 这个函数被两个地方共用：Step3Simulation.vue（判断是否 attach 而非重新
+ * start）以及 SimulationView.vue（判断要不要把用户带去 Step3/SimulationRun
+ * 而不是 Step2）。两处都是刻意让 'crashed' 算"活着"——vue-reviewer 已核实
+ * SimulationView.vue 那边因此把 crashed 也带去 run 页面是有意行为、非分叉
+ * （"no divergence introduced"），不是需要修的 bug。以后改这个函数前，先确认
+ * 两个调用点都还需要一致的语义。
  * @param {string} runnerStatus
  * @returns {boolean}
  */
 export function isRunnerAlive(runnerStatus) {
-  return runnerStatus === 'running' || runnerStatus === 'paused' || runnerStatus === 'stopping'
+  return runnerStatus === 'running' || runnerStatus === 'paused' || runnerStatus === 'stopping' || runnerStatus === 'crashed'
 }
 
 /**

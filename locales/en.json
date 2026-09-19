@@ -219,7 +219,13 @@
     "ingestionSafe": "Data is safely saved — it's now safe to click Stop Simulation then Generate Report.",
     "ingestionEtaCalculating": "calculating estimate...",
     "ingestionEtaDone": "estimated completion {eta}",
-    "completedLockTitle": "Simulation is completed — this project is now view-only to protect what you already paid for."
+    "completedLockTitle": "Simulation is completed — this project is now view-only to protect what you already paid for.",
+    "crashedBadge": "Retrying...",
+    "crashedBannerText": "The simulation stopped unexpectedly due to a server issue. It's being retried automatically — no action needed yet.",
+    "needsAttentionBadge": "Needs Attention",
+    "needsAttentionBannerText": "The automatic retry didn't succeed. This simulation needs help from our support team before it can continue.",
+    "needsAttentionLockTitle": "Restart is disabled because an automatic retry already failed the same way. You can still go back to Step 2, or contact support for help with this run.",
+    "crashedLockTitle": "Restart is disabled while the system is automatically retrying this simulation. Please wait a moment."
   },
   "step4": {
     "generatingSection": "Generating {title}...",
@@ -557,6 +563,9 @@
     "allPlatformsCompleted": "✓ All platform simulations have ended",
     "simCompleted": "✓ Simulation completed",
     "simFailed": "✗ Simulation failed",
+    "simCrashed": "⚠ Simulation process stopped unexpectedly — retrying automatically...",
+    "simRecoveredFromCrash": "✓ Automatic retry succeeded — simulation is running again.",
+    "simNeedsAttention": "✗ Automatic retry failed — this simulation needs manual attention from support.",
     "confirmStopSimulation": "Stop the running simulation? This cannot be undone.",
     "confirmRestartSimulation": "Restarting will DELETE all logs and progress of the current run and start a brand new one. Continue?",
     "attachingToRunningSim": "A simulation is already running — attaching to it. Action history before this refresh may be incomplete.",

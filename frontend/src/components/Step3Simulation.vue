@@ -1,5 +1,15 @@
 <template>
   <div class="simulation-panel">
+    <!-- Run-health banner: crashed (retrying) / needs_attention (terminal, manual help) -->
+    <div v-if="isCrashedState" class="run-health-banner run-health-banner--retrying" role="status">
+      <span class="run-health-badge run-health-badge--retrying">{{ $t('step3.crashedBadge') }}</span>
+      <span class="run-health-text">{{ $t('step3.crashedBannerText') }}</span>
+    </div>
+    <div v-else-if="isNeedsAttentionState" class="run-health-banner run-health-banner--needs-attention" role="alert">
+      <span class="run-health-badge run-health-badge--needs-attention">{{ $t('step3.needsAttentionBadge') }}</span>
+      <span class="run-health-text">{{ $t('step3.needsAttentionBannerText') }}</span>
+    </div>
+
     <!-- Top Control Bar -->
     <div class="control-bar">
       <div class="status-group">
@@ -101,8 +111,8 @@
         <button
           class="action-btn secondary"
           :disabled="isStarting || isStopping"
-          :aria-disabled="isSimulationCompleted ? 'true' : null"
-          :aria-describedby="isSimulationCompleted ? 'step3-lock-reason' : null"
+          :aria-disabled="isRestartLocked ? 'true' : null"
+          :aria-describedby="isRestartLocked ? (isSimulationCompleted ? 'step3-lock-reason' : (isNeedsAttentionState ? 'step3-needs-attention-reason' : 'step3-crashed-reason')) : null"
           @click="handleRestartClick"
         >
           {{ $t('step3.restartBtn') }}
@@ -126,6 +136,14 @@
         </button>
         <span v-if="isSimulationCompleted" id="step3-lock-reason" class="lock-reason-text">
           {{ completedLockTitle }}
+        </span>
+        <!-- needs_attention: cuma Restart yang dikunci (Back tetap bisa) — lihat isRestartLocked -->
+        <span v-else-if="isNeedsAttentionState" id="step3-needs-attention-reason" class="lock-reason-text">
+          {{ needsAttentionLockTitle }}
+        </span>
+        <!-- crashed: backend lagi auto-retry, cuma Restart yang dikunci (Back tetap bisa) — lihat isRestartLocked -->
+        <span v-else-if="isCrashedState" id="step3-crashed-reason" class="lock-reason-text">
+          {{ crashedLockTitle }}
         </span>
       </div>
     </div>
@@ -375,12 +393,38 @@ const runStatus = ref({})
 // tetap aktif kalau failed (user nggak boleh kejebak di layar gagal tanpa
 // jalan keluar) — makanya butuh flag terpisah dari phase mentah.
 const isRunnerFailed = ref(false)
-// "Selesai beneran" (bukan gagal) — satu-satunya kondisi yang boleh mengunci
-// Restart & Back jadi view-only, sesuai jaminan bayar-per-project T3F1.
-const isSimulationCompleted = computed(() => phase.value === 2 && !isRunnerFailed.value)
+// T3F2: 'crashed' dan 'needs_attention' dari backend (T0-T2). crashed = proses
+// mati tapi backend LAGI retry otomatis (bukan terminal, phase TETAP 1, polling
+// TETAP jalan). needs_attention = retry otomatis udah dicoba dan tetap gagal
+// (terminal, phase=2, polling berhenti) — dibaca langsung dari runStatus supaya
+// selalu sinkron dengan poll/attach terakhir, tanpa ref duplikat yang bisa basi.
+const isCrashedState = computed(() => runStatus.value.runner_status === 'crashed')
+const isNeedsAttentionState = computed(() => runStatus.value.runner_status === 'needs_attention')
+// Dipakai buat log sekali per transisi (bukan tiap 2 detik polling) — lihat
+// fetchRunStatus/attachToRunningSimulation.
+const prevRunnerStatus = ref(null)
+// "Selesai beneran" (bukan gagal, bukan needs_attention) — satu-satunya kondisi
+// yang boleh mengunci Restart & Back jadi view-only, sesuai jaminan
+// bayar-per-project T3F1. needs_attention DIKELUARKAN dengan sengaja: itu
+// bukan sukses, tapi Back tetap wajib bisa dipencet (user nggak boleh kejebak).
+const isSimulationCompleted = computed(() => phase.value === 2 && !isRunnerFailed.value && !isNeedsAttentionState.value)
+// needs_attention: retry otomatis backend udah dicoba dan tetap gagal — klik
+// Restart manual oleh user kemungkinan besar bakal gagal lagi dengan cara yang
+// sama (mengulang percobaan yang sudah terbukti nggak cukup), jadi Restart
+// dikunci. TAPI ini beda dari "completed" (isSimulationCompleted) — Back tetap
+// harus bisa, supaya user punya jalan keluar sementara nunggu bantuan manual.
+// crashed: backend (T2) LAGI auto-retry buat simulation_id yang sama (spawn
+// proses baru, nyimpen retry_count). Restart manual di momen ini bisa race
+// sama proses auto-retry backend (dua permintaan "mulai simulasi baru"
+// bersamaan) — berpotensi data dobel/proses saling tabrakan. Alasannya beda
+// dari needs_attention: bukan "udah gagal permanen", tapi "lagi dicoba
+// otomatis, tunggu dulu" — makanya teks lock-nya terpisah (crashedLockTitle).
+const isRestartLocked = computed(() => isSimulationCompleted.value || isNeedsAttentionState.value || isCrashedState.value)
 // Lewat i18n (locales/en.json + locales/zh.json, key step3.completedLockTitle),
 // konsisten dengan string user-facing lain di komponen ini yang semuanya lewat t().
 const completedLockTitle = computed(() => t('step3.completedLockTitle'))
+const needsAttentionLockTitle = computed(() => t('step3.needsAttentionLockTitle'))
+const crashedLockTitle = computed(() => t('step3.crashedLockTitle'))
 const allActions = ref([]) // 所有动作（增量累积）
 const actionIds = ref(new Set()) // 用于去重的动作ID集合
 const scrollContainer = ref(null)
@@ -532,6 +576,7 @@ const resetAllState = () => {
   startError.value = null
   isStarting.value = false
   isStopping.value = false
+  prevRunnerStatus.value = null
   stopPolling()  // 停止之前可能存在的轮询
 }
 
@@ -657,7 +702,7 @@ const handleStopClick = async () => {
 // waktu locked — makanya blokir klik-nya harus dicek manual di sini, native
 // disabled attribute sudah tidak lagi menutup jalan browser.
 const handleRestartClick = async () => {
-  if (isSimulationCompleted.value) return
+  if (isRestartLocked.value) return
   if (!confirm(t('log.confirmRestartSimulation'))) return
   await doForceRestart()
 }
@@ -696,6 +741,20 @@ const attachToRunningSimulation = async (statusData = null) => {
       isRunnerFailed.value = true
       addLog(t('log.simFailed') + (data.error ? `: ${data.error}` : ''))
       emit('update-status', 'error')
+      prevRunnerStatus.value = data.runner_status
+      return true
+    }
+
+    // needs_attention: backend sudah coba retry otomatis dan tetap gagal — ini
+    // terminal (nggak akan sembuh sendiri), jadi berhenti polling. Beda dari
+    // failed: pesannya harus jelas ini BUKAN kegagalan biasa yang bisa langsung
+    // di-restart (lihat isRestartLocked).
+    if (data.runner_status === 'needs_attention') {
+      phase.value = 2
+      isRunnerFailed.value = false
+      addLog(t('log.simNeedsAttention'))
+      emit('update-status', 'error')
+      prevRunnerStatus.value = data.runner_status
       return true
     }
 
@@ -706,7 +765,16 @@ const attachToRunningSimulation = async (statusData = null) => {
       isRunnerFailed.value = false
       addLog(t('log.attachSimCompleted'))
       emit('update-status', 'completed')
+      prevRunnerStatus.value = data.runner_status
       return true
+    }
+
+    // crashed: proses mati tapi backend LAGI retry otomatis dengan simulation_id
+    // yang sama — BUKAN kegagalan permanen. Tetap phase=1 (bukan terminal) dan
+    // TETAP polling di bawah, supaya UI update begitu retry-nya selesai
+    // (sukses jadi running lagi, atau gagal jadi needs_attention).
+    if (data.runner_status === 'crashed') {
+      addLog(t('log.simCrashed'))
     }
 
     // Rounds abis + ingestion drained BUKAN pengganti isTerminal — backend
@@ -721,6 +789,7 @@ const attachToRunningSimulation = async (statusData = null) => {
     emit('update-status', 'processing')
     startStatusPolling()
     startDetailPolling()
+    prevRunnerStatus.value = data.runner_status
     return true
   } catch (err) {
     addLog(t('log.checkStatusFailed', { error: err.message }))
@@ -788,7 +857,10 @@ const fetchRunStatus = async () => {
       // 检测模拟是否已完成（通过 runner_status 或平台完成状态判断）
       const isCompleted = data.runner_status === 'completed' || data.runner_status === 'stopped'
       const isFailed = data.runner_status === 'failed'
-      
+      const isNeedsAttentionStatus = data.runner_status === 'needs_attention'
+      const isCrashed = data.runner_status === 'crashed'
+      const isNewTransition = data.runner_status !== prevRunnerStatus.value
+
       // runner_status is authoritative because the backend only publishes a
       // terminal state after the Zep ingestion barrier has completed.
       if (isFailed) {
@@ -797,13 +869,37 @@ const fetchRunStatus = async () => {
         isRunnerFailed.value = true
         stopPolling()
         emit('update-status', 'error')
+      } else if (isNeedsAttentionStatus) {
+        // Terminal — retry otomatis backend sudah dicoba dan tetap gagal.
+        // STOP polling: nggak ada gunanya polling terus, status ini nggak akan
+        // sembuh sendiri sampai ada intervensi manual (lihat isRestartLocked).
+        if (isNewTransition) addLog(t('log.simNeedsAttention'))
+        phase.value = 2
+        isRunnerFailed.value = false
+        stopPolling()
+        emit('update-status', 'error')
       } else if (isCompleted) {
         addLog(t('log.simCompleted'))
         phase.value = 2
         isRunnerFailed.value = false
         stopPolling()
         emit('update-status', 'completed')
+      } else if (isCrashed) {
+        // BUKAN terminal — backend lagi retry otomatis dengan simulation_id
+        // yang sama. Tetap polling (jangan stopPolling) supaya UI ke-update
+        // begitu retry-nya selesai (balik jadi running, atau jadi
+        // needs_attention kalau tetap gagal). Log sekali per transisi biar
+        // nggak spam tiap 2 detik selama nunggu retry.
+        if (isNewTransition) addLog(t('log.simCrashed'))
+        emit('update-status', 'processing')
+      } else if (isNewTransition && prevRunnerStatus.value === 'crashed' && data.runner_status === 'running') {
+        // Auto-retry backend SUKSES: proses yang tadinya crashed sekarang
+        // balik jadi running. User nggak dapet sinyal eksplisit soal ini
+        // sebelumnya — tambahin log sekali per transisi (bukan tiap 2 detik).
+        addLog(t('log.simRecoveredFromCrash'))
       }
+
+      prevRunnerStatus.value = data.runner_status
     }
   } catch (err) {
     console.warn('获取运行状态失败:', err)
@@ -1014,7 +1110,14 @@ onMounted(async () => {
     const res = await getRunStatus(props.simulationId)
     if (!isMounted) return
 
-    if (res.success && res.data && isRunnerAlive(res.data.runner_status)) {
+    // needs_attention digabung manual di sini (bukan lewat isRunnerAlive):
+    // prosesnya BENERAN nggak lagi alive/jalan, tapi kalau nggak di-attach di
+    // sini, cabang else di bawah bakal doStartSimulation({force:false}) —
+    // membuka simulation BARU di atas satu yang lagi butuh perhatian manual.
+    // Attach di sini justru untuk MENAMPILKAN pesan terminalnya (lihat
+    // attachToRunningSimulation), bukan buat lanjut polling.
+    const isAttachable = res.data && (isRunnerAlive(res.data.runner_status) || res.data.runner_status === 'needs_attention')
+    if (res.success && isAttachable) {
       addLog(t('log.attachingToRunningSim'))
       await attachToRunningSimulation(res.data)
       return
@@ -1341,6 +1444,61 @@ onUnmounted(() => {
 
 .ingestion-text--safe {
   font-weight: 600;
+}
+
+/* --- Run-health banner (T3F2): crashed (retrying) vs needs_attention (terminal) ---
+   Sengaja beda warna dari platform-status.active (hijau = Running normal) supaya
+   nggak tertukar visual dengan "lagi jalan normal". */
+.run-health-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 24px;
+  font-size: 12px;
+  flex-shrink: 0;
+  border-bottom: 1px solid transparent;
+}
+
+.run-health-banner--retrying {
+  background: #FFF8E1;
+  border-bottom-color: #FFE082;
+  color: #8A6100;
+}
+
+.run-health-banner--needs-attention {
+  background: #FDECEA;
+  border-bottom-color: #F5C6C2;
+  color: #8B2E24;
+}
+
+.run-health-badge {
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.run-health-badge--retrying {
+  background: #FFC107;
+  color: #4A3800;
+  animation: run-health-pulse 1.4s ease-in-out infinite;
+}
+
+.run-health-badge--needs-attention {
+  background: #D32F2F;
+  color: #FFF;
+}
+
+.run-health-text {
+  line-height: 1.4;
+}
+
+@keyframes run-health-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
 }
 
 /* --- Main Content Area --- */

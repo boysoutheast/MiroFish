@@ -219,7 +219,13 @@
     "ingestionSafe": "数据已安全保存 —— 现在可以放心点击停止模拟然后生成报告。",
     "ingestionEtaCalculating": "正在计算预估时间...",
     "ingestionEtaDone": "预计完成 {eta}",
-    "completedLockTitle": "模拟已完成 —— 为保护您已支付的项目成果，当前仅供查看，不可再操作。"
+    "completedLockTitle": "模拟已完成 —— 为保护您已支付的项目成果，当前仅供查看，不可再操作。",
+    "crashedBadge": "自动重试中...",
+    "crashedBannerText": "模拟进程因服务器问题意外中断，系统正在自动重试，暂时无需操作。",
+    "needsAttentionBadge": "需要人工处理",
+    "needsAttentionBannerText": "自动重试未能成功。此次模拟需要客服团队协助才能继续。",
+    "needsAttentionLockTitle": "自动重试已经用同样的方式失败过，所以重新开始被禁用。您仍可以返回 Step 2，或联系客服协助处理这次运行。",
+    "crashedLockTitle": "系统正在自动重试此次模拟，重新开始已被禁用，请稍候。"
   },
   "step4": {
     "generatingSection": "正在生成{title}...",
@@ -557,6 +563,9 @@
     "allPlatformsCompleted": "✓ 检测到所有平台模拟已结束",
     "simCompleted": "✓ 模拟已完成",
     "simFailed": "✗ 模拟失败",
+    "simCrashed": "⚠ 模拟进程意外中断 —— 正在自动重试...",
+    "simRecoveredFromCrash": "✓ 自动重试成功 —— 模拟已恢复运行。",
+    "simNeedsAttention": "✗ 自动重试失败 —— 此次模拟需要客服人工处理。",
     "confirmStopSimulation": "确定要停止正在运行的模拟吗？此操作不可撤销。",
     "confirmRestartSimulation": "重新开始会删除本次运行的全部日志和进度，并重新启动一次全新的模拟。是否继续？",
     "attachingToRunningSim": "检测到模拟已在运行，正在接入——刷新前的动作记录可能不完整。",
