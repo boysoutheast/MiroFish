@@ -768,13 +768,37 @@ class SimulationRunner:
                             RunnerStatus.STOPPING,
                         )
                         try:
-                            ZepGraphMemoryManager.stop_updater(simulation_id)
+                            result = ZepGraphMemoryManager.stop_updater(simulation_id)
                             cls._graph_memory_enabled.pop(simulation_id, None)
-                            logger.info(
-                                "已停止图谱记忆更新: simulation_id=%s",
-                                simulation_id,
-                            )
+                            if result is not None and result.incomplete:
+                                # Plain give-up (Zep repeatedly unreachable /
+                                # batches that never made it) is an expected
+                                # operational outcome now — stop_updater()
+                                # reports it via ZepUpdaterStopResult instead
+                                # of raising. Do not fail the run; persist
+                                # the incomplete flag so the report can note
+                                # it (see report.py _apply_ingestion_incomplete_note).
+                                state.ingestion_incomplete = True
+                                state.ingestion_incomplete_detail = (
+                                    result.detail or "Zep graph ingestion is incomplete"
+                                )
+                                logger.warning(
+                                    "Zep图谱写入未完整完成（放弃重试，不标记为失败）: "
+                                    "simulation_id=%s, detail=%s",
+                                    simulation_id,
+                                    state.ingestion_incomplete_detail,
+                                )
+                            else:
+                                logger.info(
+                                    "已停止图谱记忆更新: simulation_id=%s",
+                                    simulation_id,
+                                )
                         except Exception as error:
+                            # A genuine bug (e.g. worker thread refusing to
+                            # stop within the drain deadline) — not a plain
+                            # Zep give-up, which stop_updater() now reports
+                            # via ZepUpdaterStopResult.incomplete instead of
+                            # raising RuntimeError.
                             logger.error(f"停止图谱记忆更新器失败: {error}")
                             desired_status = RunnerStatus.FAILED
                             error_message = f"Zep图谱写入未完整完成: {error}"
@@ -1095,9 +1119,27 @@ class SimulationRunner:
                 state = cls.get_run_state(simulation_id) or state
                 if cls._graph_memory_enabled.get(simulation_id, False):
                     try:
-                        ZepGraphMemoryManager.stop_updater(simulation_id)
+                        result = ZepGraphMemoryManager.stop_updater(simulation_id)
                         cls._graph_memory_enabled.pop(simulation_id, None)
+                        if result is not None and result.incomplete:
+                            # Plain give-up — see the matching comment in
+                            # _monitor_simulation. Not a failure; persist the
+                            # flag so the report can note it.
+                            state.ingestion_incomplete = True
+                            state.ingestion_incomplete_detail = (
+                                result.detail or "Zep graph ingestion is incomplete"
+                            )
+                            logger.warning(
+                                "Zep图谱写入未完整完成（放弃重试，不标记为失败）: "
+                                "simulation_id=%s, detail=%s",
+                                simulation_id,
+                                state.ingestion_incomplete_detail,
+                            )
                     except Exception as error:
+                        # A genuine bug (worker thread refusing to stop
+                        # within the drain deadline) — not a plain Zep
+                        # give-up, which stop_updater() now reports via
+                        # ZepUpdaterStopResult.incomplete instead of raising.
                         state.runner_status = RunnerStatus.FAILED
                         state.twitter_running = False
                         state.reddit_running = False

@@ -13,6 +13,7 @@ from app.services.simulation_runner import (
     SimulationRunner,
     SimulationStopPending,
 )
+from app.services.zep_graph_memory_updater import ZepUpdaterStopResult
 
 
 def test_manual_stop_surfaces_graph_ingestion_failure(monkeypatch):
@@ -576,6 +577,150 @@ def test_shutdown_terminates_producer_before_tail_read_and_updater_drain(
         SimulationRunner._monitor_threads.pop(simulation_id, None)
         SimulationRunner._graph_memory_enabled.pop(simulation_id, None)
         SimulationRunner._manual_stop_requests.discard(simulation_id)
+
+
+def test_manual_stop_zep_giveup_does_not_fail_the_run(monkeypatch):
+    """T5 putaran 2: stop_updater() no longer raises RuntimeError for a plain
+    Zep give-up — it returns ZepUpdaterStopResult(incomplete=True). The
+    manual-stop caller in stop_simulation() must read that result instead of
+    depending on the RuntimeError it used to catch, and must NOT mark the run
+    FAILED for a give-up. It must instead persist ingestion_incomplete on the
+    run_state."""
+    state = SimulationRunState(
+        simulation_id="sim-giveup",
+        runner_status=RunnerStatus.RUNNING,
+    )
+    saved = []
+    monkeypatch.setattr(
+        SimulationRunner,
+        "get_run_state",
+        classmethod(lambda _cls, _simulation_id: state),
+    )
+    monkeypatch.setattr(
+        SimulationRunner,
+        "_save_run_state",
+        classmethod(lambda _cls, value: saved.append(value.runner_status)),
+    )
+    monkeypatch.setattr(
+        runner_module.ZepGraphMemoryManager,
+        "stop_updater",
+        classmethod(
+            lambda _cls, _simulation_id: ZepUpdaterStopResult(
+                incomplete=True,
+                failed_batch_count=2,
+                sent_item_count=3,
+                detail="2 Zep activity batch(es) failed to send (Zep Cloud unreachable)",
+            )
+        ),
+    )
+    SimulationRunner._processes.pop("sim-giveup", None)
+    SimulationRunner._graph_memory_enabled["sim-giveup"] = True
+
+    try:
+        result = SimulationRunner.stop_simulation("sim-giveup")
+
+        # Print actual values, not just booleans, per the T5 evidence bar.
+        print(f"result.runner_status={result.runner_status!r}")
+        print(f"result.ingestion_incomplete={result.ingestion_incomplete!r}")
+        print(
+            "result.ingestion_incomplete_detail="
+            f"{result.ingestion_incomplete_detail!r}"
+        )
+
+        assert result.runner_status == RunnerStatus.STOPPED
+        assert result.error is None
+        assert result.ingestion_incomplete is True
+        assert result.ingestion_incomplete_detail
+        assert RunnerStatus.FAILED not in saved
+    finally:
+        SimulationRunner._graph_memory_enabled.pop("sim-giveup", None)
+        SimulationRunner._manual_stop_requests.discard("sim-giveup")
+
+
+def test_manual_stop_zep_full_success_leaves_ingestion_incomplete_false(
+    monkeypatch,
+):
+    """Reverse direction of the give-up test above: ingestion succeeds fully
+    -> normal STOPPED status, ingestion_incomplete stays False."""
+    state = SimulationRunState(
+        simulation_id="sim-success",
+        runner_status=RunnerStatus.RUNNING,
+    )
+    monkeypatch.setattr(
+        SimulationRunner,
+        "get_run_state",
+        classmethod(lambda _cls, _simulation_id: state),
+    )
+    monkeypatch.setattr(
+        SimulationRunner,
+        "_save_run_state",
+        classmethod(lambda _cls, _value: None),
+    )
+    monkeypatch.setattr(
+        runner_module.ZepGraphMemoryManager,
+        "stop_updater",
+        classmethod(
+            lambda _cls, _simulation_id: ZepUpdaterStopResult(
+                incomplete=False,
+                failed_batch_count=0,
+                sent_item_count=5,
+                detail=None,
+            )
+        ),
+    )
+    SimulationRunner._processes.pop("sim-success", None)
+    SimulationRunner._graph_memory_enabled["sim-success"] = True
+
+    try:
+        result = SimulationRunner.stop_simulation("sim-success")
+
+        print(f"result.runner_status={result.runner_status!r}")
+        print(f"result.ingestion_incomplete={result.ingestion_incomplete!r}")
+
+        assert result.runner_status == RunnerStatus.STOPPED
+        assert result.error is None
+        assert result.ingestion_incomplete is False
+        assert result.ingestion_incomplete_detail is None
+    finally:
+        SimulationRunner._graph_memory_enabled.pop("sim-success", None)
+        SimulationRunner._manual_stop_requests.discard("sim-success")
+
+
+def test_ingestion_incomplete_flag_survives_run_state_reload(monkeypatch, tmp_path):
+    """The ingestion_incomplete flag set on a Zep give-up must be the
+    PERSISTENT source of truth (backend restart must not lose it) —
+    simulated here as save -> drop the in-memory cache -> load a fresh
+    run_state from disk."""
+    monkeypatch.setattr(SimulationRunner, "RUN_STATE_DIR", str(tmp_path))
+
+    state = SimulationRunState(
+        simulation_id="sim-persist",
+        runner_status=RunnerStatus.STOPPED,
+        ingestion_incomplete=True,
+        ingestion_incomplete_detail="2 Zep activity batch(es) failed to send",
+    )
+    SimulationRunner._save_run_state(state)
+
+    # Simulate a backend restart: drop the in-memory cache so the next read
+    # is forced to go through _load_run_state (disk).
+    SimulationRunner._run_states.pop("sim-persist", None)
+
+    try:
+        reloaded = SimulationRunner.get_run_state("sim-persist")
+
+        print(f"reloaded.ingestion_incomplete={reloaded.ingestion_incomplete!r}")
+        print(
+            "reloaded.ingestion_incomplete_detail="
+            f"{reloaded.ingestion_incomplete_detail!r}"
+        )
+
+        assert reloaded is not None
+        assert reloaded.ingestion_incomplete is True
+        assert reloaded.ingestion_incomplete_detail == (
+            "2 Zep activity batch(es) failed to send"
+        )
+    finally:
+        SimulationRunner._run_states.pop("sim-persist", None)
 
 
 def test_shutdown_drain_failure_remains_failed_and_retryable(monkeypatch):

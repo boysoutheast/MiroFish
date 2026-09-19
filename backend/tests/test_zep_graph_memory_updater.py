@@ -106,7 +106,11 @@ def test_activity_episode_has_provenance_time_and_a_safe_size(monkeypatch):
     assert write["metadata"]["activity_count"] == 1
 
 
-def test_failed_non_idempotent_write_is_reported_by_stop(monkeypatch):
+def test_failed_non_idempotent_write_is_reported_by_stop_without_raising(monkeypatch):
+    """A batch that fails to send (e.g. Zep down) must not raise. stop() gives
+    up cleanly and reports the outcome in a ZepUpdaterStopResult instead —
+    exceptions are for bugs, not for an expected upstream outage."""
+
     def add(**_kwargs):
         raise RuntimeError("write failed")
 
@@ -114,10 +118,115 @@ def test_failed_non_idempotent_write_is_reported_by_stop(monkeypatch):
     updater.start()
     updater.add_activity(_activity())
 
-    with pytest.raises(RuntimeError, match="ingestion is incomplete"):
-        updater.stop()
+    result = updater.stop()
 
+    assert isinstance(result, updater_module.ZepUpdaterStopResult)
+    assert result.incomplete is True
+    assert result.failed_batch_count == 1
+    assert "write failed" in (result.detail or "")
     assert updater.get_stats()["failed_count"] == 1
+
+
+def test_stop_waits_for_already_sent_episodes_before_giving_up(monkeypatch):
+    """Reproduces the ordering bug directly: one activity succeeds (its
+    episode goes into _pending_episode_uuids), a second fails. stop() must
+    still call _wait_for_pending_episodes for the successful one BEFORE
+    deciding to give up because of the failed one — proven here via a spy
+    that records call order, not just via the final result."""
+
+    call_order = []
+
+    def add(**kwargs):
+        if kwargs["metadata"]["agent_ids"] == "1":
+            return SimpleNamespace(uuid_="episode-ok")
+        raise RuntimeError("zep unreachable")
+
+    updater = _updater(monkeypatch, add)
+    updater.BATCH_SIZE = 1
+    updater.start()
+    updater.add_activity(_activity(index=1))
+    updater.add_activity(_activity(index=2))
+
+    original_wait = updater._wait_for_pending_episodes
+
+    def spy_wait(**kwargs):
+        call_order.append("wait_for_pending_episodes")
+        return original_wait(**kwargs)
+
+    monkeypatch.setattr(updater, "_wait_for_pending_episodes", spy_wait)
+
+    result = updater.stop()
+
+    assert call_order == ["wait_for_pending_episodes"]
+    assert result.incomplete is True
+    assert result.failed_batch_count == 1
+    # The successfully-sent episode was waited on and cleared, not discarded.
+    assert updater._pending_episode_uuids == []
+
+
+def test_stop_updater_releases_registry_entry_on_give_up(monkeypatch):
+    """This is the actual bug: before this fix, a give-up left the updater
+    registered forever, so generate_report() kept refusing with 409. After
+    the fix, ZepGraphMemoryManager.get_updater(sim_id) must return None once
+    stop_updater() has run, even though ingestion gave up."""
+
+    def add(**_kwargs):
+        raise RuntimeError("zep down")
+
+    simulation_id = "sim-giveup"
+    client = _client(add)
+    monkeypatch.setattr(updater_module, "get_zep_client", lambda _key: client)
+    monkeypatch.setattr(updater_module.Config, "ZEP_API_KEY", "test-key")
+
+    ZepGraphMemoryManager._updaters.pop(simulation_id, None)
+    ZepGraphMemoryManager._incomplete_ingestions.pop(simulation_id, None)
+    try:
+        updater = ZepGraphMemoryManager.create_updater(simulation_id, "graph-1")
+        updater.SEND_INTERVAL = 0
+        updater.add_activity(_activity())
+
+        result = ZepGraphMemoryManager.stop_updater(simulation_id)
+
+        assert result.incomplete is True
+        assert ZepGraphMemoryManager.get_updater(simulation_id) is None
+        assert ZepGraphMemoryManager.get_incomplete_ingestion_detail(
+            simulation_id
+        ) is not None
+    finally:
+        ZepGraphMemoryManager._updaters.pop(simulation_id, None)
+        ZepGraphMemoryManager._incomplete_ingestions.pop(simulation_id, None)
+
+
+def test_stop_updater_clears_incomplete_marker_on_success(monkeypatch):
+    """The reverse direction: a fully successful drain must not leave a
+    stale incomplete marker (e.g. from a previous failed run of the same
+    simulation_id) lying around for the next report."""
+
+    simulation_id = "sim-success"
+    client = _client(lambda **_kwargs: SimpleNamespace(uuid_="episode-1"))
+    monkeypatch.setattr(updater_module, "get_zep_client", lambda _key: client)
+    monkeypatch.setattr(updater_module.Config, "ZEP_API_KEY", "test-key")
+
+    ZepGraphMemoryManager._updaters.pop(simulation_id, None)
+    ZepGraphMemoryManager._incomplete_ingestions[simulation_id] = "stale from last run"
+    try:
+        updater = ZepGraphMemoryManager.create_updater(simulation_id, "graph-1")
+        updater.SEND_INTERVAL = 0
+        assert ZepGraphMemoryManager.get_incomplete_ingestion_detail(
+            simulation_id
+        ) is None  # cleared by create_updater()
+
+        updater.add_activity(_activity())
+        result = ZepGraphMemoryManager.stop_updater(simulation_id)
+
+        assert result.incomplete is False
+        assert ZepGraphMemoryManager.get_updater(simulation_id) is None
+        assert ZepGraphMemoryManager.get_incomplete_ingestion_detail(
+            simulation_id
+        ) is None
+    finally:
+        ZepGraphMemoryManager._updaters.pop(simulation_id, None)
+        ZepGraphMemoryManager._incomplete_ingestions.pop(simulation_id, None)
 
 
 def test_failed_simulation_action_is_not_ingested(monkeypatch):

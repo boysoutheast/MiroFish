@@ -451,7 +451,13 @@ class Report:
     created_at: str = ""
     completed_at: str = ""
     error: Optional[str] = None
-    
+    # True when the Zep graph ingestion for this simulation gave up before
+    # everything was confirmed sent (e.g. Zep was unreachable). The report is
+    # still generated — this just tells the reader some source material may
+    # be missing from the memory graph it was built from.
+    ingestion_incomplete: bool = False
+    ingestion_note: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "report_id": self.report_id,
@@ -463,7 +469,9 @@ class Report:
             "markdown_content": self.markdown_content,
             "created_at": self.created_at,
             "completed_at": self.completed_at,
-            "error": self.error
+            "error": self.error,
+            "ingestion_incomplete": self.ingestion_incomplete,
+            "ingestion_note": self.ingestion_note,
         }
 
 
@@ -2540,7 +2548,9 @@ class ReportManager:
             markdown_content=markdown_content,
             created_at=data.get('created_at', ''),
             completed_at=data.get('completed_at', ''),
-            error=data.get('error')
+            error=data.get('error'),
+            ingestion_incomplete=data.get('ingestion_incomplete', False),
+            ingestion_note=data.get('ingestion_note'),
         )
     
     @classmethod
