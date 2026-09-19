@@ -373,6 +373,7 @@
     "maxRoundsInvalid": "max_rounds 必须是有效的整数",
     "invalidPlatform": "无效的平台类型: {platform}，可选: twitter/reddit/parallel",
     "simRunningForceHint": "模拟正在运行中，请先调用 /stop 接口停止，或使用 force=true 强制重新开始",
+    "simCompletedLocked": "该模拟已经完成，无法重新运行。已完成的模拟数据永久保留，不能重启或清空",
     "simNotReady": "模拟未准备好，当前状态: {status}，请先调用 /prepare 接口",
     "graphIdRequiredForMemory": "启用图谱记忆更新需要有效的 graph_id，请确保项目已构建图谱",
     "dbNotExist": "数据库不存在，模拟可能尚未运行",
