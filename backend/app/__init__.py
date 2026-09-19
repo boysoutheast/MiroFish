@@ -47,6 +47,35 @@ def create_app(config_class=Config):
     SimulationRunner.register_cleanup()
     if should_log_startup:
         logger.info("已注册模拟进程清理函数")
+
+    # T1: 启动时核对每个 run_state.json 里"应该还活着"的模拟（STARTING/
+    # RUNNING/PAUSED/STOPPING），把进程真的已经死掉（例如服务器重启）的标记
+    # 为 CRASHED。这是一个新 guard（不是"跟 register_cleanup() 一样的
+    # guard"——register_cleanup() 本身没有任何 guard，所有进程都会跑一次，
+    # 只有它的 LOG 语句用 debug_mode 做了 guard）。这里直接复用第 34 行算出
+    # 的 debug_mode（来自 app.config['DEBUG']），跟 should_log_startup 用
+    # 同一个逻辑：非 debug 模式下永远跑；debug 模式下只在 reloader 子进程
+    # （WERKZEUG_RUN_MAIN=true，真正服务请求的进程）跑一次，避免父进程和
+    # 子进程各跑一次导致 reconciliation 执行两次。
+    #
+    # 导入和调用都包在 try/except 里：reconcile_on_startup() 内部本身已经
+    # 包住 try/except（各别模拟的 reconcile 失败不影响其他模拟），但这里
+    # 的 import 语句本身没有被那层保护——如果新依赖（如 psutil）在某个部署
+    # 环境没装上，或者模块里有其他 ImportError/SyntaxError，会直接从
+    # create_app() 冒出来，导致后端整个起不来。reconciliation 失败绝对不能
+    # 让后端启动失败。
+    should_reconcile = not debug_mode or is_reloader_process
+    if should_reconcile:
+        try:
+            from .services.simulation_reconciler import reconcile_on_startup
+            reconcile_on_startup()
+            if should_log_startup:
+                logger.info("已完成模拟状态核对（reconciliation）")
+        except Exception:
+            logger.exception(
+                "载入或执行 reconcile_on_startup() 失败，后端仍然继续启动"
+                "（reconciliation 不是启动的必要条件）。"
+            )
     
     # 请求日志中间件
     @app.before_request

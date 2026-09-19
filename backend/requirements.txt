@@ -34,3 +34,7 @@ python-dotenv>=1.0.0
 
 # 数据验证
 pydantic>=2.0.0
+
+# ============= 进程管理 =============
+# 核对模拟进程 PID/启动时间（reconciliation，T1）
+psutil>=5.9.0
