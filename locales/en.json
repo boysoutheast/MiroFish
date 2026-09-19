@@ -374,6 +374,7 @@
     "maxRoundsInvalid": "max_rounds must be a valid integer",
     "invalidPlatform": "Invalid platform type: {platform}. Options: twitter/reddit/parallel",
     "simRunningForceHint": "Simulation is running. Stop it first via /stop, or use force=true to restart.",
+    "simCompletedLocked": "This simulation has already completed and cannot be run again. Completed simulation data is permanent and cannot be restarted or cleared.",
     "simNotReady": "Simulation not ready. Current status: {status}. Please call /prepare first.",
     "graphIdRequiredForMemory": "Graph memory update requires a valid graph_id. Ensure the graph is built.",
     "dbNotExist": "Database does not exist. The simulation may not have run yet.",

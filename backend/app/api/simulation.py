@@ -1639,6 +1639,23 @@ def start_simulation():
                             "error": str(error),
                         }), 409
                     except Exception as error:
+                        # 窄竞态窗口：force=true 请求在 RUNNING 时进入，但
+                        # 模拟在 stop_simulation() 执行期间真的跑到了
+                        # COMPLETED，导致 stop_simulation() 用它自己的
+                        # ValueError 拒绝了 stop。此时重新读取最新
+                        # run_state，如果确认是 COMPLETED，必须返回
+                        # simCompletedLocked（永久锁定），而不是暗示
+                        # "稍后重试" 的通用完成失败提示——否则第一次请求
+                        # 拿到的消息会误导用户去重试一个永远不会成功的操作。
+                        latest_run_state = SimulationRunner.get_run_state(simulation_id)
+                        if (
+                            latest_run_state
+                            and latest_run_state.runner_status == RunnerStatus.COMPLETED
+                        ):
+                            return jsonify({
+                                "success": False,
+                                "error": t('api.simCompletedLocked')
+                            }), 409
                         return jsonify({
                             "success": False,
                             "error": (
@@ -1651,6 +1668,15 @@ def start_simulation():
                             "success": False,
                             "error": "Previous simulation did not reach STOPPED",
                         }), 409
+
+                # 已完成的模拟对应已付费项目，数据必须永久保留：任何 force
+                # 重启都不得触发 cleanup_simulation_logs（会永久删除
+                # run_state.json / 日志 / 模拟 DB）。STOPPED / FAILED 仍可重启。
+                if run_state and run_state.runner_status == RunnerStatus.COMPLETED:
+                    return jsonify({
+                        "success": False,
+                        "error": t('api.simCompletedLocked')
+                    }), 409
 
                 # 如果是强制模式，清理运行日志
                 if force:

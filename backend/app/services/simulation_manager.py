@@ -33,6 +33,8 @@ class SimulationStatus(str, Enum):
     STOPPED = "stopped"      # 模拟被手动停止
     COMPLETED = "completed"  # 模拟自然完成
     FAILED = "failed"
+    CRASHED = "crashed"      # 进程消失但没有记录到退出码（基础设施故障）
+    NEEDS_ATTENTION = "needs_attention"  # 自动重试一次后仍失败，需人工介入
 
 
 class PlatformType(str, Enum):

@@ -13,6 +13,7 @@ from app.services.simulation_runner import (
     SimulationRunner,
     SimulationStopPending,
 )
+from app.services.zep_graph_memory_updater import ZepUpdaterStopResult
 
 
 def test_manual_stop_surfaces_graph_ingestion_failure(monkeypatch):
@@ -270,6 +271,159 @@ def test_force_restart_does_not_continue_while_old_ingestion_is_pending(monkeypa
     assert cleanup_called == []
 
 
+def test_force_restart_blocked_for_completed_simulation(monkeypatch):
+    """T3B1: paid, COMPLETED simulations are permanent records — force=true
+    must never reach cleanup_simulation_logs (which deletes run_state.json,
+    logs, and the simulation DB) once the run finished."""
+    simulation = SimpleNamespace(
+        simulation_id="sim-1",
+        project_id="proj-1",
+        graph_id=None,
+        status=SimulationStatus.COMPLETED,
+    )
+    cleanup_called = []
+    stop_called = []
+    start_called = []
+    monkeypatch.setattr(
+        simulation_api,
+        "SimulationManager",
+        lambda: SimpleNamespace(
+            get_simulation=lambda _simulation_id: simulation,
+            _save_simulation_state=lambda _state: None,
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_api,
+        "_check_simulation_prepared",
+        lambda _simulation_id: (True, {}),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "get_run_state",
+        classmethod(
+            lambda _cls, _simulation_id: SimpleNamespace(
+                runner_status=RunnerStatus.COMPLETED
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_api.ZepGraphMemoryManager,
+        "get_updater",
+        classmethod(lambda _cls, _simulation_id: None),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "stop_simulation",
+        classmethod(lambda _cls, _simulation_id: stop_called.append(True)),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "cleanup_simulation_logs",
+        classmethod(
+            lambda _cls, _simulation_id: cleanup_called.append(True)
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "start_simulation",
+        classmethod(lambda _cls, **_kwargs: start_called.append(True)),
+    )
+
+    app = Flask(__name__)
+    with app.test_request_context(
+        "/api/simulation/start",
+        method="POST",
+        json={"simulation_id": "sim-1", "force": True},
+    ):
+        response, status = simulation_api.start_simulation()
+
+    body = response.get_json()
+    assert status == 409
+    assert body["success"] is False
+    assert "已经完成" in body["error"] or "completed" in body["error"].lower()
+    assert cleanup_called == []
+    assert stop_called == []
+    assert start_called == []
+
+
+@pytest.mark.parametrize("runner_status", [RunnerStatus.STOPPED, RunnerStatus.FAILED])
+def test_force_restart_allowed_for_stopped_or_failed_simulation(
+    monkeypatch, runner_status
+):
+    """T3B1 regression guard: the new COMPLETED lock must not block the
+    existing, already-final product decision that STOPPED/FAILED runs may
+    still be force-restarted."""
+    simulation = SimpleNamespace(
+        simulation_id="sim-1",
+        project_id="proj-1",
+        graph_id=None,
+        status=SimulationStatus.STOPPED,
+    )
+    cleanup_called = []
+    start_called = []
+    fake_new_run_state = SimpleNamespace(
+        to_dict=lambda: {"simulation_id": "sim-1", "runner_status": "running"}
+    )
+    monkeypatch.setattr(
+        simulation_api,
+        "SimulationManager",
+        lambda: SimpleNamespace(
+            get_simulation=lambda _simulation_id: simulation,
+            _save_simulation_state=lambda _state: None,
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_api,
+        "_check_simulation_prepared",
+        lambda _simulation_id: (True, {}),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "get_run_state",
+        classmethod(
+            lambda _cls, _simulation_id: SimpleNamespace(
+                runner_status=runner_status
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_api.ZepGraphMemoryManager,
+        "get_updater",
+        classmethod(lambda _cls, _simulation_id: None),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "cleanup_simulation_logs",
+        classmethod(
+            lambda _cls, _simulation_id: cleanup_called.append(True)
+            or {"success": True}
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_api.SimulationRunner,
+        "start_simulation",
+        classmethod(
+            lambda _cls, **_kwargs: start_called.append(True)
+            or fake_new_run_state
+        ),
+    )
+
+    app = Flask(__name__)
+    with app.test_request_context(
+        "/api/simulation/start",
+        method="POST",
+        json={"simulation_id": "sim-1", "force": True},
+    ):
+        result = simulation_api.start_simulation()
+
+    response, status = result if isinstance(result, tuple) else (result, 200)
+    body = response.get_json()
+    assert status == 200
+    assert body["success"] is True
+    assert cleanup_called == [True]
+    assert start_called == [True]
+
+
 def test_monitor_start_failure_terminates_the_spawned_process(monkeypatch, tmp_path):
     simulation_id = "sim-start-failure"
     sim_dir = tmp_path / "runs" / simulation_id
@@ -423,6 +577,150 @@ def test_shutdown_terminates_producer_before_tail_read_and_updater_drain(
         SimulationRunner._monitor_threads.pop(simulation_id, None)
         SimulationRunner._graph_memory_enabled.pop(simulation_id, None)
         SimulationRunner._manual_stop_requests.discard(simulation_id)
+
+
+def test_manual_stop_zep_giveup_does_not_fail_the_run(monkeypatch):
+    """T5 putaran 2: stop_updater() no longer raises RuntimeError for a plain
+    Zep give-up — it returns ZepUpdaterStopResult(incomplete=True). The
+    manual-stop caller in stop_simulation() must read that result instead of
+    depending on the RuntimeError it used to catch, and must NOT mark the run
+    FAILED for a give-up. It must instead persist ingestion_incomplete on the
+    run_state."""
+    state = SimulationRunState(
+        simulation_id="sim-giveup",
+        runner_status=RunnerStatus.RUNNING,
+    )
+    saved = []
+    monkeypatch.setattr(
+        SimulationRunner,
+        "get_run_state",
+        classmethod(lambda _cls, _simulation_id: state),
+    )
+    monkeypatch.setattr(
+        SimulationRunner,
+        "_save_run_state",
+        classmethod(lambda _cls, value: saved.append(value.runner_status)),
+    )
+    monkeypatch.setattr(
+        runner_module.ZepGraphMemoryManager,
+        "stop_updater",
+        classmethod(
+            lambda _cls, _simulation_id: ZepUpdaterStopResult(
+                incomplete=True,
+                failed_batch_count=2,
+                sent_item_count=3,
+                detail="2 Zep activity batch(es) failed to send (Zep Cloud unreachable)",
+            )
+        ),
+    )
+    SimulationRunner._processes.pop("sim-giveup", None)
+    SimulationRunner._graph_memory_enabled["sim-giveup"] = True
+
+    try:
+        result = SimulationRunner.stop_simulation("sim-giveup")
+
+        # Print actual values, not just booleans, per the T5 evidence bar.
+        print(f"result.runner_status={result.runner_status!r}")
+        print(f"result.ingestion_incomplete={result.ingestion_incomplete!r}")
+        print(
+            "result.ingestion_incomplete_detail="
+            f"{result.ingestion_incomplete_detail!r}"
+        )
+
+        assert result.runner_status == RunnerStatus.STOPPED
+        assert result.error is None
+        assert result.ingestion_incomplete is True
+        assert result.ingestion_incomplete_detail
+        assert RunnerStatus.FAILED not in saved
+    finally:
+        SimulationRunner._graph_memory_enabled.pop("sim-giveup", None)
+        SimulationRunner._manual_stop_requests.discard("sim-giveup")
+
+
+def test_manual_stop_zep_full_success_leaves_ingestion_incomplete_false(
+    monkeypatch,
+):
+    """Reverse direction of the give-up test above: ingestion succeeds fully
+    -> normal STOPPED status, ingestion_incomplete stays False."""
+    state = SimulationRunState(
+        simulation_id="sim-success",
+        runner_status=RunnerStatus.RUNNING,
+    )
+    monkeypatch.setattr(
+        SimulationRunner,
+        "get_run_state",
+        classmethod(lambda _cls, _simulation_id: state),
+    )
+    monkeypatch.setattr(
+        SimulationRunner,
+        "_save_run_state",
+        classmethod(lambda _cls, _value: None),
+    )
+    monkeypatch.setattr(
+        runner_module.ZepGraphMemoryManager,
+        "stop_updater",
+        classmethod(
+            lambda _cls, _simulation_id: ZepUpdaterStopResult(
+                incomplete=False,
+                failed_batch_count=0,
+                sent_item_count=5,
+                detail=None,
+            )
+        ),
+    )
+    SimulationRunner._processes.pop("sim-success", None)
+    SimulationRunner._graph_memory_enabled["sim-success"] = True
+
+    try:
+        result = SimulationRunner.stop_simulation("sim-success")
+
+        print(f"result.runner_status={result.runner_status!r}")
+        print(f"result.ingestion_incomplete={result.ingestion_incomplete!r}")
+
+        assert result.runner_status == RunnerStatus.STOPPED
+        assert result.error is None
+        assert result.ingestion_incomplete is False
+        assert result.ingestion_incomplete_detail is None
+    finally:
+        SimulationRunner._graph_memory_enabled.pop("sim-success", None)
+        SimulationRunner._manual_stop_requests.discard("sim-success")
+
+
+def test_ingestion_incomplete_flag_survives_run_state_reload(monkeypatch, tmp_path):
+    """The ingestion_incomplete flag set on a Zep give-up must be the
+    PERSISTENT source of truth (backend restart must not lose it) —
+    simulated here as save -> drop the in-memory cache -> load a fresh
+    run_state from disk."""
+    monkeypatch.setattr(SimulationRunner, "RUN_STATE_DIR", str(tmp_path))
+
+    state = SimulationRunState(
+        simulation_id="sim-persist",
+        runner_status=RunnerStatus.STOPPED,
+        ingestion_incomplete=True,
+        ingestion_incomplete_detail="2 Zep activity batch(es) failed to send",
+    )
+    SimulationRunner._save_run_state(state)
+
+    # Simulate a backend restart: drop the in-memory cache so the next read
+    # is forced to go through _load_run_state (disk).
+    SimulationRunner._run_states.pop("sim-persist", None)
+
+    try:
+        reloaded = SimulationRunner.get_run_state("sim-persist")
+
+        print(f"reloaded.ingestion_incomplete={reloaded.ingestion_incomplete!r}")
+        print(
+            "reloaded.ingestion_incomplete_detail="
+            f"{reloaded.ingestion_incomplete_detail!r}"
+        )
+
+        assert reloaded is not None
+        assert reloaded.ingestion_incomplete is True
+        assert reloaded.ingestion_incomplete_detail == (
+            "2 Zep activity batch(es) failed to send"
+        )
+    finally:
+        SimulationRunner._run_states.pop("sim-persist", None)
 
 
 def test_shutdown_drain_failure_remains_failed_and_retryable(monkeypatch):

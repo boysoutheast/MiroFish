@@ -27,6 +27,46 @@ from ..utils.zep_lifecycle import (
 logger = get_logger('mirofish.api.report')
 
 
+def _apply_ingestion_incomplete_note(report, simulation_id: str) -> None:
+    """Tag a completed report when the Zep ingestion for it gave up early.
+
+    Source of truth is the persisted SimulationRunState.ingestion_incomplete /
+    ingestion_incomplete_detail fields (set by SimulationRunner when
+    stop_updater() reports a give-up — see simulation_runner.py). They are
+    written to run_state.json and survive a backend restart. The in-memory
+    ZepGraphMemoryManager registry (set by stop_updater() — see
+    zep_graph_memory_updater.py) is kept as a same-process fallback for a
+    run_state that predates this field, could not be loaded, or was never
+    persisted.
+    """
+    detail = None
+    run_state = SimulationRunner.get_run_state(simulation_id)
+    if run_state is not None and run_state.ingestion_incomplete:
+        detail = (
+            run_state.ingestion_incomplete_detail
+            or "Zep graph ingestion is incomplete"
+        )
+    if not detail:
+        detail = ZepGraphMemoryManager.get_incomplete_ingestion_detail(simulation_id)
+    if not detail:
+        return
+
+    report.ingestion_incomplete = True
+    report.ingestion_note = (
+        "Sebagian aktivitas simulasi gagal masuk ke memori grafik Zep "
+        f"sebelum report ini dibuat: {detail}. Report tetap dibuat dari data "
+        "yang berhasil masuk."
+    )
+
+    warning_block = (
+        "> ⚠️ **Data belum lengkap**: sebagian data simulasi belum sempat "
+        "masuk ke sistem memori (Zep) sebelum report ini dibuat "
+        f"({detail}). Report di bawah ini disusun dari data yang berhasil "
+        "masuk saja — sebagian aktivitas mungkin tidak tercermin.\n\n"
+    )
+    report.markdown_content = warning_block + (report.markdown_content or "")
+
+
 # ============== 报告生成接口 ==============
 
 @report_bp.route('/generate', methods=['POST'])
@@ -269,6 +309,10 @@ def generate_report():
                         progress_callback=progress_callback,
                         report_id=report_id
                     )
+
+                    if report.status == ReportStatus.COMPLETED:
+                        _apply_ingestion_incomplete_note(report, simulation_id)
+
                     ReportManager.save_report(report)
 
                     if report.status == ReportStatus.COMPLETED:

@@ -47,6 +47,11 @@ class RunnerStatus(str, Enum):
     STOPPED = "stopped"
     COMPLETED = "completed"
     FAILED = "failed"
+    # 进程消失但没有记录到退出码（例如后端在模拟运行中被重启/宿主机崩溃），
+    # 区别于 FAILED（进程正常退出但返回非零码）
+    CRASHED = "crashed"
+    # 已经自动重试过一次仍然失败，需要人工介入
+    NEEDS_ATTENTION = "needs_attention"
 
 
 class SimulationStopPending(TimeoutError):
@@ -151,7 +156,23 @@ class SimulationRunState:
     
     # 进程ID（用于停止）
     process_pid: Optional[int] = None
-    
+
+    # 进程创建时间（psutil.Process(pid).create_time()），用于防止 PID 复用误判——
+    # 服务器重启后 OS 可能把同一个 PID 分配给别的进程，仅比对 PID 不够，必须连同
+    # create_time 一起核对，确认查到的确实是我们自己启动的那个进程
+    process_started_at: Optional[float] = None
+
+    # 自动重试信息（T2 使用，T0 只建立字段）
+    retry_count: int = 0
+    retried_at: Optional[str] = None
+
+    # 启动参数快照，供自动重试（T2）无需用户交互即可重新调用 start_simulation()
+    start_params: Optional[dict] = None
+
+    # 图谱写入未完整完成的标记（该 run 的报告/统计可能不完整）
+    ingestion_incomplete: bool = False
+    ingestion_incomplete_detail: Optional[str] = None
+
     def add_action(self, action: AgentAction):
         """添加动作到最近动作列表"""
         self.recent_actions.insert(0, action)
@@ -191,8 +212,14 @@ class SimulationRunState:
             "completed_at": self.completed_at,
             "error": self.error,
             "process_pid": self.process_pid,
+            "process_started_at": self.process_started_at,
+            "retry_count": self.retry_count,
+            "retried_at": self.retried_at,
+            "start_params": self.start_params,
+            "ingestion_incomplete": self.ingestion_incomplete,
+            "ingestion_incomplete_detail": self.ingestion_incomplete_detail,
         }
-    
+
     def to_detail_dict(self) -> Dict[str, Any]:
         """包含最近动作的详细信息"""
         result = self.to_dict()
@@ -262,9 +289,15 @@ class SimulationRunner:
             RunnerStatus.STOPPED: SimulationStatus.STOPPED,
             RunnerStatus.COMPLETED: SimulationStatus.COMPLETED,
             RunnerStatus.FAILED: SimulationStatus.FAILED,
+            RunnerStatus.CRASHED: SimulationStatus.CRASHED,
+            RunnerStatus.NEEDS_ATTENTION: SimulationStatus.NEEDS_ATTENTION,
         }
         status = status_map.get(runner_status)
         if status is None:
+            # Unmapped RunnerStatus values (IDLE/STARTING/PAUSED) intentionally
+            # skip the projection — they are not terminal/observable states for
+            # SimulationStatus. Any status added to RunnerStatus that SHOULD be
+            # projected must be added to status_map above; do not silently drop.
             return
         try:
             manager = SimulationManager()
@@ -331,6 +364,14 @@ class SimulationRunner:
                 completed_at=data.get("completed_at"),
                 error=data.get("error"),
                 process_pid=data.get("process_pid"),
+                # 旧版 run_state.json 没有这些字段——都必须有默认值，读取旧文件
+                # 不能抛异常
+                process_started_at=data.get("process_started_at"),
+                retry_count=data.get("retry_count", 0),
+                retried_at=data.get("retried_at"),
+                start_params=data.get("start_params"),
+                ingestion_incomplete=data.get("ingestion_incomplete", False),
+                ingestion_incomplete_detail=data.get("ingestion_incomplete_detail"),
             )
             
             # 加载最近动作
@@ -418,6 +459,15 @@ class SimulationRunner:
             total_rounds=total_rounds,
             total_simulation_hours=total_hours,
             started_at=datetime.now().isoformat(),
+            # Snapshot of the params actually used to start this run, so a
+            # future auto-retry (T2) can call start_simulation() again without
+            # asking the user to re-enter anything.
+            start_params={
+                "platform": platform,
+                "max_rounds": max_rounds,
+                "graph_id": graph_id,
+                "enable_graph_memory_update": enable_graph_memory_update,
+            },
         )
         
         # Atomically claim this simulation ID. The expensive updater/process
@@ -718,13 +768,37 @@ class SimulationRunner:
                             RunnerStatus.STOPPING,
                         )
                         try:
-                            ZepGraphMemoryManager.stop_updater(simulation_id)
+                            result = ZepGraphMemoryManager.stop_updater(simulation_id)
                             cls._graph_memory_enabled.pop(simulation_id, None)
-                            logger.info(
-                                "已停止图谱记忆更新: simulation_id=%s",
-                                simulation_id,
-                            )
+                            if result is not None and result.incomplete:
+                                # Plain give-up (Zep repeatedly unreachable /
+                                # batches that never made it) is an expected
+                                # operational outcome now — stop_updater()
+                                # reports it via ZepUpdaterStopResult instead
+                                # of raising. Do not fail the run; persist
+                                # the incomplete flag so the report can note
+                                # it (see report.py _apply_ingestion_incomplete_note).
+                                state.ingestion_incomplete = True
+                                state.ingestion_incomplete_detail = (
+                                    result.detail or "Zep graph ingestion is incomplete"
+                                )
+                                logger.warning(
+                                    "Zep图谱写入未完整完成（放弃重试，不标记为失败）: "
+                                    "simulation_id=%s, detail=%s",
+                                    simulation_id,
+                                    state.ingestion_incomplete_detail,
+                                )
+                            else:
+                                logger.info(
+                                    "已停止图谱记忆更新: simulation_id=%s",
+                                    simulation_id,
+                                )
                         except Exception as error:
+                            # A genuine bug (e.g. worker thread refusing to
+                            # stop within the drain deadline) — not a plain
+                            # Zep give-up, which stop_updater() now reports
+                            # via ZepUpdaterStopResult.incomplete instead of
+                            # raising RuntimeError.
                             logger.error(f"停止图谱记忆更新器失败: {error}")
                             desired_status = RunnerStatus.FAILED
                             error_message = f"Zep图谱写入未完整完成: {error}"
@@ -1045,9 +1119,27 @@ class SimulationRunner:
                 state = cls.get_run_state(simulation_id) or state
                 if cls._graph_memory_enabled.get(simulation_id, False):
                     try:
-                        ZepGraphMemoryManager.stop_updater(simulation_id)
+                        result = ZepGraphMemoryManager.stop_updater(simulation_id)
                         cls._graph_memory_enabled.pop(simulation_id, None)
+                        if result is not None and result.incomplete:
+                            # Plain give-up — see the matching comment in
+                            # _monitor_simulation. Not a failure; persist the
+                            # flag so the report can note it.
+                            state.ingestion_incomplete = True
+                            state.ingestion_incomplete_detail = (
+                                result.detail or "Zep graph ingestion is incomplete"
+                            )
+                            logger.warning(
+                                "Zep图谱写入未完整完成（放弃重试，不标记为失败）: "
+                                "simulation_id=%s, detail=%s",
+                                simulation_id,
+                                state.ingestion_incomplete_detail,
+                            )
                     except Exception as error:
+                        # A genuine bug (worker thread refusing to stop
+                        # within the drain deadline) — not a plain Zep
+                        # give-up, which stop_updater() now reports via
+                        # ZepUpdaterStopResult.incomplete instead of raising.
                         state.runner_status = RunnerStatus.FAILED
                         state.twitter_running = False
                         state.reddit_running = False

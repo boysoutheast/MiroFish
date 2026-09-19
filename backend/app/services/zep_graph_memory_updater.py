@@ -210,6 +210,22 @@ class _DrainDeadlineExceeded(TimeoutError):
         self.processed_count = processed_count
 
 
+@dataclass
+class ZepUpdaterStopResult:
+    """Structured outcome of ZepGraphMemoryUpdater.stop().
+
+    This is returned instead of raised. A give-up (Zep repeatedly
+    unreachable, batches that never made it) is an expected operational
+    outcome, not a bug — callers decide how to surface it (e.g. report a
+    partial/incomplete ingestion note to the user) instead of being forced
+    into permanent failure handling.
+    """
+    incomplete: bool
+    failed_batch_count: int = 0
+    sent_item_count: int = 0
+    detail: Optional[str] = None
+
+
 class ZepGraphMemoryUpdater:
     """
     Zep图谱记忆更新器
@@ -310,8 +326,18 @@ class ZepGraphMemoryUpdater:
         self._worker_thread.start()
         logger.info(f"ZepGraphMemoryUpdater 已启动: graph_id={self.graph_id}")
     
-    def stop(self):
-        """Drain the worker, flush tail events, and wait for Cloud ingestion."""
+    def stop(self) -> ZepUpdaterStopResult:
+        """Drain the worker, flush tail events, and wait for Cloud ingestion.
+
+        Never raises for a plain give-up (Zep repeatedly unreachable / batches
+        that failed to send). Whatever episodes DID make it to Zep are still
+        waited on so that confirmed work is not discarded just because some
+        other batch failed — give-up is decided only after that wait. The
+        outcome is returned as a ZepUpdaterStopResult for the caller to act on
+        (e.g. surface an "ingestion incomplete" note instead of blocking
+        forever). A TimeoutError is still raised for the worker thread
+        genuinely refusing to stop — that is a bug, not an expected Zep outage.
+        """
         deadline = time.time() + ZEP_INGESTION_WAIT_TIMEOUT_SECONDS
         # Serialize the accepting->closed transition with add_activity's
         # check+enqueue operation. This closes the small race where a producer
@@ -332,20 +358,53 @@ class ZepGraphMemoryUpdater:
         # worker but not yet buffered.
         self._flush_remaining(deadline=deadline)
 
-        if self._failed_batches:
-            raise RuntimeError(
-                f"{len(self._failed_batches)} Zep activity batch(es) failed; "
-                "simulation graph ingestion is incomplete"
+        # Wait for whatever DID get accepted by Zep before deciding whether to
+        # give up. Doing this before the _failed_batches check means a batch
+        # that failed never throws away episodes that succeeded.
+        pending_detail: Optional[str] = None
+        try:
+            self._wait_for_pending_episodes(deadline=deadline)
+        except TimeoutError as error:
+            pending_detail = str(error)
+
+        incomplete = bool(self._failed_batches) or pending_detail is not None
+        detail: Optional[str] = None
+        if incomplete:
+            detail_parts = []
+            if self._failed_batches:
+                sample_errors = ", ".join(
+                    str(batch.get("error"))
+                    for batch in self._failed_batches[:3]
+                    if batch.get("error")
+                )
+                detail_parts.append(
+                    f"{len(self._failed_batches)} Zep activity batch(es) failed to "
+                    f"send ({sample_errors})" if sample_errors else
+                    f"{len(self._failed_batches)} Zep activity batch(es) failed to send"
+                )
+            if pending_detail:
+                detail_parts.append(pending_detail)
+            detail = "; ".join(detail_parts)
+            logger.error(
+                "ZepGraphMemoryUpdater giving up cleanly: graph_id=%s, "
+                "simulation_id=%s, detail=%s, items_sent=%s",
+                self.graph_id, self.simulation_id, detail, self._total_items_sent,
             )
 
-        self._wait_for_pending_episodes(deadline=deadline)
-        
         logger.info(f"ZepGraphMemoryUpdater 已停止: graph_id={self.graph_id}, "
                    f"total_activities={self._total_activities}, "
                    f"batches_sent={self._total_sent}, "
                    f"items_sent={self._total_items_sent}, "
                    f"failed={self._failed_count}, "
-                   f"skipped={self._skipped_count}")
+                   f"skipped={self._skipped_count}, "
+                   f"incomplete={incomplete}")
+
+        return ZepUpdaterStopResult(
+            incomplete=incomplete,
+            failed_batch_count=len(self._failed_batches),
+            sent_item_count=self._total_items_sent,
+            detail=detail,
+        )
     
     def add_activity(self, activity: AgentActivity):
         """
@@ -649,16 +708,22 @@ class ZepGraphMemoryManager:
     
     _updaters: Dict[str, ZepGraphMemoryUpdater] = {}
     _lock = threading.Lock()
-    
+
+    # simulation_id -> human-readable detail, populated when stop_updater()
+    # gives up on a batch of failed/unconfirmed Zep episodes instead of
+    # blocking the registry forever. Cleared when a fresh updater is created
+    # for that simulation_id (a rerun may succeed where the last one didn't).
+    _incomplete_ingestions: Dict[str, str] = {}
+
     @classmethod
     def create_updater(cls, simulation_id: str, graph_id: str) -> ZepGraphMemoryUpdater:
         """
         为模拟创建图谱记忆更新器
-        
+
         Args:
             simulation_id: 模拟ID
             graph_id: Zep图谱ID
-            
+
         Returns:
             ZepGraphMemoryUpdater实例
         """
@@ -666,17 +731,29 @@ class ZepGraphMemoryManager:
             # 如果已存在，先停止旧的
             if simulation_id in cls._updaters:
                 cls._updaters[simulation_id].stop()
-            
+
             updater = ZepGraphMemoryUpdater(
                 graph_id,
                 simulation_id=simulation_id,
             )
             updater.start()
             cls._updaters[simulation_id] = updater
+            cls._incomplete_ingestions.pop(simulation_id, None)
             cls._stop_all_done = False
-            
+
             logger.info(f"创建图谱记忆更新器: simulation_id={simulation_id}, graph_id={graph_id}")
             return updater
+
+    @classmethod
+    def get_incomplete_ingestion_detail(cls, simulation_id: str) -> Optional[str]:
+        """Return the give-up detail for a simulation's last stop(), if any.
+
+        None means the last known stop() either fully succeeded or hasn't
+        happened yet (or this process has no memory of it — this is an
+        in-memory registry, not persisted state).
+        """
+        with cls._lock:
+            return cls._incomplete_ingestions.get(simulation_id)
     
     @classmethod
     def get_updater(cls, simulation_id: str) -> Optional[ZepGraphMemoryUpdater]:
@@ -727,22 +804,45 @@ class ZepGraphMemoryManager:
         return True
     
     @classmethod
-    def stop_updater(cls, simulation_id: str):
-        """停止并移除模拟的更新器"""
+    def stop_updater(cls, simulation_id: str) -> Optional[ZepUpdaterStopResult]:
+        """停止并移除模拟的更新器
+
+        Returns the ZepUpdaterStopResult from updater.stop(), or None if
+        there was no updater registered for this simulation_id.
+        """
         with cls._lock:
             updater = cls._updaters.get(simulation_id)
         if updater is None:
-            return
+            return None
 
         # Do not hold the manager lock through up to several minutes of Cloud
-        # polling. Crucially, only remove the updater after a successful drain;
-        # on failure it remains visible to report/deletion barriers and can be
-        # stopped again.
-        updater.stop()
+        # polling. updater.stop() no longer raises for a plain give-up (Zep
+        # unreachable, batches that failed) — only for the worker thread
+        # genuinely refusing to stop, which remains a real bug. So the
+        # updater is now removed from the registry in both the success and
+        # give-up case; only that genuine-bug exception leaves it registered
+        # for another stop attempt.
+        result = updater.stop()
         with cls._lock:
             if cls._updaters.get(simulation_id) is updater:
                 cls._updaters.pop(simulation_id, None)
+            if result.incomplete:
+                cls._incomplete_ingestions[simulation_id] = (
+                    result.detail or "Zep graph ingestion is incomplete"
+                )
+            else:
+                cls._incomplete_ingestions.pop(simulation_id, None)
+
+        if result.incomplete:
+            logger.error(
+                "Zep updater gave up for simulation_id=%s, graph_id=%s: %s "
+                "(items_sent=%s, failed_batches=%s) — updater released from "
+                "registry so report generation is not blocked forever",
+                simulation_id, updater.graph_id, result.detail,
+                result.sent_item_count, result.failed_batch_count,
+            )
         logger.info(f"已停止图谱记忆更新器: simulation_id={simulation_id}")
+        return result
     
     # 防止 stop_all 重复调用的标志
     _stop_all_done = False
