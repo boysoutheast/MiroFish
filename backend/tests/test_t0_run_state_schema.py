@@ -11,9 +11,11 @@ Cakupan uji:
    load balik -> nilai identik.
 """
 
+import glob
 import json
 import os
 import shutil
+from unittest import mock
 
 import pytest
 
@@ -312,4 +314,150 @@ def test_start_simulation_populates_start_params(monkeypatch):
             except Exception:
                 pass
         SimulationRunner._stderr_files.pop(simulation_id, None)
+        _cleanup_runner(simulation_id)
+
+
+# ---------------------------------------------------------------------------
+# 4. _save_run_state() ATOMIC WRITE (putaran fix ke-2, temuan CRITICAL).
+#
+# Seluruh jaminan T2 ("catat retry_count=1 SEBELUM spawn proses baru")
+# bergantung penuh ke write ini genuinely reliable -- kalau proses mati
+# PERSIS di tengah json.dump() lama, file jadi corrupt/truncated dan
+# simulasi itu hilang dari radar reconciliation selamanya. Fix: tulis ke
+# file temporary di direktori yang sama, fsync, lalu os.replace() (atomic).
+# ---------------------------------------------------------------------------
+
+
+def test_save_run_state_process_killed_mid_write_leaves_original_file_intact():
+    """Simulasikan proses OS mati PERSIS sesudah tempfile ditulis tapi
+    SEBELUM os.replace() -- file ASLI (state_file) harus tetap versi lama
+    yang utuh, dan file temp yang setengah jadi harus dibersihkan (tidak
+    nyampah di direktori)."""
+    simulation_id = "sim_t0_atomic_interrupt_before_replace"
+
+    old_state = SimulationRunState(
+        simulation_id=simulation_id,
+        runner_status=RunnerStatus.RUNNING,
+        retry_count=0,
+        error=None,
+    )
+
+    try:
+        # Tulis versi LAMA dulu, genuinely lewat _save_run_state (sudah
+        # atomic) supaya file awal ini representatif.
+        SimulationRunner._save_run_state(old_state)
+        state_file = os.path.join(_sim_dir(simulation_id), "run_state.json")
+        with open(state_file, "r", encoding="utf-8") as f:
+            original_bytes = f.read()
+        assert '"retry_count": 0' in original_bytes
+
+        new_state = SimulationRunState(
+            simulation_id=simulation_id,
+            runner_status=RunnerStatus.NEEDS_ATTENTION,
+            retry_count=1,
+            error="ini TIDAK BOLEH sampai ke disk",
+        )
+
+        # Mock os.replace supaya melempar exception -- meniru proses yang
+        # mati/OSError PERSIS di titik itu, SESUDAH tempfile lengkap+fsync
+        # tapi SEBELUM rename atomic terjadi.
+        with mock.patch(
+            "app.services.simulation_runner.os.replace",
+            side_effect=OSError("simulated OS kill mid-write"),
+        ):
+            with pytest.raises(OSError):
+                SimulationRunner._save_run_state(new_state)
+
+        # File ASLI harus TETAP UTUH -- masih versi lama, byte-for-byte.
+        with open(state_file, "r", encoding="utf-8") as f:
+            after_bytes = f.read()
+        assert after_bytes == original_bytes
+        assert '"retry_count": 0' in after_bytes
+        assert "ini TIDAK BOLEH sampai ke disk" not in after_bytes
+
+        # File temp yang setengah jadi harus DIBERSIHKAN, tidak nyampah.
+        leftover_tmp = glob.glob(
+            os.path.join(_sim_dir(simulation_id), "run_state_*.tmp")
+        )
+        assert leftover_tmp == [], f"file temp harusnya kehapus: {leftover_tmp}"
+    finally:
+        _cleanup_runner(simulation_id)
+
+
+def test_save_run_state_interrupted_before_fsync_leaves_original_file_intact():
+    """Variasi lain: exception terjadi lebih awal lagi, saat json.dump()
+    atau fsync (mis. disk penuh) -- file asli tetap harus utuh dan file
+    temp tetap harus dibersihkan."""
+    simulation_id = "sim_t0_atomic_interrupt_before_fsync"
+
+    old_state = SimulationRunState(
+        simulation_id=simulation_id,
+        runner_status=RunnerStatus.RUNNING,
+        retry_count=0,
+    )
+
+    try:
+        SimulationRunner._save_run_state(old_state)
+        state_file = os.path.join(_sim_dir(simulation_id), "run_state.json")
+        with open(state_file, "r", encoding="utf-8") as f:
+            original_bytes = f.read()
+
+        new_state = SimulationRunState(
+            simulation_id=simulation_id,
+            runner_status=RunnerStatus.CRASHED,
+            retry_count=1,
+        )
+
+        with mock.patch(
+            "app.services.simulation_runner.os.fsync",
+            side_effect=OSError("simulated disk full during fsync"),
+        ):
+            with pytest.raises(OSError):
+                SimulationRunner._save_run_state(new_state)
+
+        with open(state_file, "r", encoding="utf-8") as f:
+            after_bytes = f.read()
+        assert after_bytes == original_bytes
+
+        leftover_tmp = glob.glob(
+            os.path.join(_sim_dir(simulation_id), "run_state_*.tmp")
+        )
+        assert leftover_tmp == [], f"file temp harusnya kehapus: {leftover_tmp}"
+    finally:
+        _cleanup_runner(simulation_id)
+
+
+def test_save_run_state_normal_write_round_trip_still_correct_after_atomic_change():
+    """Write normal (tanpa interupsi) -> baca balik -> isi identik. Pastikan
+    perubahan ke atomic write TIDAK merusak alur normal (round-trip dasar,
+    di luar test round-trip 6-field T0 yang sudah ada di atas)."""
+    simulation_id = "sim_t0_atomic_normal_roundtrip"
+
+    state = SimulationRunState(
+        simulation_id=simulation_id,
+        runner_status=RunnerStatus.COMPLETED,
+        current_round=42,
+        retry_count=1,
+        retried_at="2026-09-19T12:00:00",
+        error=None,
+    )
+
+    try:
+        SimulationRunner._save_run_state(state)
+        SimulationRunner._run_states.pop(simulation_id, None)
+
+        loaded = SimulationRunner._load_run_state(simulation_id)
+
+        assert loaded is not None
+        assert loaded.runner_status == RunnerStatus.COMPLETED
+        assert loaded.current_round == 42
+        assert loaded.retry_count == 1
+        assert loaded.retried_at == "2026-09-19T12:00:00"
+
+        # Tidak ada file temp tersisa sesudah write sukses.
+        leftover_tmp = glob.glob(
+            os.path.join(_sim_dir(simulation_id), "run_state_*.tmp")
+        )
+        assert leftover_tmp == []
+    finally:
         _cleanup_runner(simulation_id)

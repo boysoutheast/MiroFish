@@ -8,6 +8,7 @@ import sys
 import json
 import time
 import asyncio
+import tempfile
 import threading
 import subprocess
 import signal
@@ -396,16 +397,45 @@ class SimulationRunner:
     
     @classmethod
     def _save_run_state(cls, state: SimulationRunState):
-        """保存运行状态到文件"""
+        """保存运行状态到文件——ATOMIC WRITE.
+
+        T2 punya jaminan "catat retry_count=1 dulu SEBELUM spawn proses baru"
+        yang bergantung PENUH ke write ini genuinely reliable. Kalau proses
+        OS mati (OOM-kill, restart host) PERSIS di tengah write langsung ke
+        state_file, file bisa jadi corrupt/truncated — _load_run_state()
+        menangkap exception itu broad dan balikin None, sehingga simulasi
+        HILANG dari radar reconciliation selamanya (skipped_no_state).
+
+        Polanya: tulis ke file temporary di DIREKTORI YANG SAMA (bukan /tmp
+        sistem — os.replace() cuma atomic kalau source+dest satu
+        filesystem), fsync supaya data genuinely sampai disk, lalu
+        os.replace() (atomic di POSIX dan Windows NTFS) menimpa state_file.
+        Kalau ada exception SEBELUM os.replace(), file asli (state_file)
+        TIDAK TERSENTUH — masih versi lama yang utuh — dan file temp
+        dibersihkan di finally.
+        """
         sim_dir = os.path.join(cls.RUN_STATE_DIR, state.simulation_id)
         os.makedirs(sim_dir, exist_ok=True)
         state_file = os.path.join(sim_dir, "run_state.json")
-        
+
         data = state.to_detail_dict()
-        
-        with open(state_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        
+
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            prefix="run_state_", suffix=".tmp", dir=sim_dir
+        )
+        try:
+            with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, state_file)
+        except BaseException:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+
         cls._run_states[state.simulation_id] = state
     
     @classmethod
@@ -415,18 +445,27 @@ class SimulationRunner:
         platform: str = "parallel",  # twitter / reddit / parallel
         max_rounds: int = None,  # 最大模拟轮数（可选，用于截断过长的模拟）
         enable_graph_memory_update: bool = False,  # 是否将活动更新到Zep图谱
-        graph_id: str = None  # Zep图谱ID（启用图谱更新时必需）
+        graph_id: str = None,  # Zep图谱ID（启用图谱更新时必需）
+        retry_count: int = 0,  # T2 自动重试计数快照，默认 0（正常用户发起的启动）
+        retried_at: Optional[str] = None,  # T2 自动重试时间戳快照
     ) -> SimulationRunState:
         """
         启动模拟
-        
+
         Args:
             simulation_id: 模拟ID
             platform: 运行平台 (twitter/reddit/parallel)
             max_rounds: 最大模拟轮数（可选，用于截断过长的模拟）
             enable_graph_memory_update: 是否将Agent活动动态更新到Zep图谱
             graph_id: Zep图谱ID（启用图谱更新时必需）
-            
+            retry_count: T2 自动重试专用——调用方（simulation_reconciler）传入
+                预先决定好的重试次数快照，烘焙进本次启动的初始 STARTING
+                状态，并在 spawn 子进程 **之前** 落盘（见下方 `_save_run_state`
+                调用点），确保"先记账再花钱"的顺序不会被打乱。普通用户发起
+                的启动永远用默认值 0。
+            retried_at: 与 retry_count 配套的时间戳快照，同样只在 T2 自动
+                重试时由调用方传入。
+
         Returns:
             SimulationRunState
         """
@@ -468,6 +507,16 @@ class SimulationRunner:
                 "graph_id": graph_id,
                 "enable_graph_memory_update": enable_graph_memory_update,
             },
+            # T2: kalau ini panggilan auto-retry, retry_count/retried_at yang
+            # dikirim pemanggil masuk ke SINI — ke objek `state` yang persis
+            # sama yang di-`_save_run_state()` beberapa baris di bawah,
+            # SEBELUM `subprocess.Popen()` dipanggil. Itu urutan yang PRD
+            # wajibkan: retry_count naik dulu di disk, baru proses baru
+            # di-spawn. Kalau Popen (atau apa pun sesudahnya) meledak, disk
+            # sudah kadung punya retry_count ini — reconcile berikutnya tidak
+            # akan retry kedua kali.
+            retry_count=retry_count,
+            retried_at=retried_at,
         )
         
         # Atomically claim this simulation ID. The expensive updater/process
