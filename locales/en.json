@@ -218,7 +218,8 @@
     "ingestionProgress": "Saving results to memory: {itemsSent}/{total} saved, {remaining} left in queue.",
     "ingestionSafe": "Data is safely saved — it's now safe to click Stop Simulation then Generate Report.",
     "ingestionEtaCalculating": "calculating estimate...",
-    "ingestionEtaDone": "estimated completion {eta}"
+    "ingestionEtaDone": "estimated completion {eta}",
+    "completedLockTitle": "Simulation is completed — this project is now view-only to protect what you already paid for."
   },
   "step4": {
     "generatingSection": "Generating {title}...",

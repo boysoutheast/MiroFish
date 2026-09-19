@@ -147,21 +147,43 @@ const toggleMaximize = (target) => {
   }
 }
 
+// Guard re-entrancy: handleGoBack multi-step async, dipanggil dari tombol
+// Back yang tetap aktif selama simulasi jalan. Double-click / network lambat
+// bisa numpuk dua invocation bersamaan (dua alert, dua router.push) tanpa
+// guard ini.
+const isGoingBack = ref(false)
+
 const handleGoBack = async () => {
+  if (isGoingBack.value) return
+  isGoingBack.value = true
+
+  try {
+    await doHandleGoBack()
+  } finally {
+    isGoingBack.value = false
+  }
+}
+
+const doHandleGoBack = async () => {
   // 在返回 Step 2 之前，先关闭正在运行的模拟
   addLog(t('log.preparingGoBack'))
-  
+
   // 停止轮询
   stopGraphRefresh()
-  
+
+  // Belum tentu ada yang perlu distop (env nggak alive & nggak sedang
+  // simulating) — default aman = boleh navigasi. Baru jadi false kalau ada
+  // percobaan stop yang KEDUANYA gagal, atau bahkan gagal cek statusnya.
+  let stopConfirmed = true
+
   try {
     // 先尝试优雅关闭模拟环境
     const envStatusRes = await getEnvStatus({ simulation_id: currentSimulationId.value })
-    
+
     if (envStatusRes.success && envStatusRes.data?.env_alive) {
       addLog(t('log.closingSimEnv'))
       try {
-        await closeSimulationEnv({ 
+        await closeSimulationEnv({
           simulation_id: currentSimulationId.value,
           timeout: 10
         })
@@ -173,6 +195,9 @@ const handleGoBack = async () => {
           addLog(t('log.simForceStopSuccess'))
         } catch (stopErr) {
           addLog(t('log.forceStopFailed', { error: stopErr.message }))
+          // Kedua percobaan (closeSimulationEnv + fallback stopSimulation) gagal —
+          // JANGAN pindah halaman diam-diam, backend belum kebukti berhenti.
+          stopConfirmed = false
         }
       }
     } else {
@@ -184,13 +209,29 @@ const handleGoBack = async () => {
           addLog(t('log.simStopped'))
         } catch (err) {
           addLog(t('log.stopSimFailed', { error: err.message }))
+          stopConfirmed = false
         }
       }
     }
   } catch (err) {
     addLog(t('log.checkStatusFailed', { error: err.message }))
+    // Nggak bisa cek status env sama sekali — sama-sama nggak ada bukti
+    // simulasi sudah berhenti, jangan pindah halaman.
+    stopConfirmed = false
   }
-  
+
+  if (!stopConfirmed) {
+    // Pesan yang KELIHATAN di layar (bukan cuma system log), pola alert()
+    // yang sudah dipakai di komponen lain (mis. Step1GraphBuild.vue).
+    window.alert('Failed to confirm the simulation has stopped. Please try "Back to Step 2" again before leaving this page.')
+    // Navigasi dibatalkan → user tetap di halaman ini, jadi polling graph
+    // yang tadi dihentikan di atas perlu dihidupkan lagi kalau masih jalan.
+    if (isSimulating.value) {
+      startGraphRefresh()
+    }
+    return
+  }
+
   // 返回到 Step 2 (环境搭建)
   router.push({ name: 'Simulation', params: { simulationId: currentSimulationId.value } })
 }

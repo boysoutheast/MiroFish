@@ -101,12 +101,16 @@
         <button
           class="action-btn secondary"
           :disabled="isStarting || isStopping"
+          :aria-disabled="isSimulationCompleted ? 'true' : null"
+          :aria-describedby="isSimulationCompleted ? 'step3-lock-reason' : null"
           @click="handleRestartClick"
         >
           {{ $t('step3.restartBtn') }}
         </button>
         <button
           class="action-btn secondary"
+          :aria-disabled="isSimulationCompleted ? 'true' : null"
+          :aria-describedby="isSimulationCompleted ? 'step3-lock-reason' : null"
           @click="handleBackClick"
         >
           {{ $t('step3.backToStep2Btn') }}
@@ -120,6 +124,9 @@
           {{ isGeneratingReport ? $t('step3.generatingReportBtn') : $t('step3.startGenerateReportBtn') }}
           <span v-if="!isGeneratingReport" class="arrow-icon">→</span>
         </button>
+        <span v-if="isSimulationCompleted" id="step3-lock-reason" class="lock-reason-text">
+          {{ completedLockTitle }}
+        </span>
       </div>
     </div>
 
@@ -362,6 +369,18 @@ const isStarting = ref(false)
 const isStopping = ref(false)
 const startError = ref(null)
 const runStatus = ref({})
+// phase===2 dipakai bareng buat dua kondisi berbeda: completed (sukses/stopped)
+// DAN failed (runner_status === 'failed', lihat attachToRunningSimulation &
+// fetchRunStatus). Restart/Back harus mati kalau completed, TAPI Back harus
+// tetap aktif kalau failed (user nggak boleh kejebak di layar gagal tanpa
+// jalan keluar) — makanya butuh flag terpisah dari phase mentah.
+const isRunnerFailed = ref(false)
+// "Selesai beneran" (bukan gagal) — satu-satunya kondisi yang boleh mengunci
+// Restart & Back jadi view-only, sesuai jaminan bayar-per-project T3F1.
+const isSimulationCompleted = computed(() => phase.value === 2 && !isRunnerFailed.value)
+// Lewat i18n (locales/en.json + locales/zh.json, key step3.completedLockTitle),
+// konsisten dengan string user-facing lain di komponen ini yang semuanya lewat t().
+const completedLockTitle = computed(() => t('step3.completedLockTitle'))
 const allActions = ref([]) // 所有动作（增量累积）
 const actionIds = ref(new Set()) // 用于去重的动作ID集合
 const scrollContainer = ref(null)
@@ -503,6 +522,7 @@ const addLog = (msg) => {
 // 重置所有状态（用于重新启动模拟）
 const resetAllState = () => {
   phase.value = 0
+  isRunnerFailed.value = false
   runStatus.value = {}
   allActions.value = []
   actionIds.value = new Set()
@@ -612,6 +632,7 @@ const handleStopSimulation = async () => {
       addLog(t('log.simStoppedSuccess'))
       if (stopGeneration === simGeneration) {
         phase.value = 2
+        isRunnerFailed.value = false
         stopPolling()
         emit('update-status', 'completed')
       }
@@ -632,7 +653,11 @@ const handleStopClick = async () => {
 }
 
 // 重新开始：会清空本次运行的全部日志/进度，务必先确认
+// aria-disabled (bukan native disabled) tetap membuat tombol ini focusable
+// waktu locked — makanya blokir klik-nya harus dicek manual di sini, native
+// disabled attribute sudah tidak lagi menutup jalan browser.
 const handleRestartClick = async () => {
+  if (isSimulationCompleted.value) return
   if (!confirm(t('log.confirmRestartSimulation'))) return
   await doForceRestart()
 }
@@ -643,6 +668,7 @@ const doForceRestart = async () => {
 }
 
 const handleBackClick = () => {
+  if (isSimulationCompleted.value) return
   emit('go-back')
 }
 
@@ -667,6 +693,7 @@ const attachToRunningSimulation = async (statusData = null) => {
 
     if (data.runner_status === 'failed') {
       phase.value = 2
+      isRunnerFailed.value = true
       addLog(t('log.simFailed') + (data.error ? `: ${data.error}` : ''))
       emit('update-status', 'error')
       return true
@@ -676,6 +703,7 @@ const attachToRunningSimulation = async (statusData = null) => {
 
     if (isTerminal) {
       phase.value = 2
+      isRunnerFailed.value = false
       addLog(t('log.attachSimCompleted'))
       emit('update-status', 'completed')
       return true
@@ -689,6 +717,7 @@ const attachToRunningSimulation = async (statusData = null) => {
     // lewat showIngestionStatus/isIngestionDrained yang sudah ada (independen
     // dari fungsi ini).
     phase.value = 1
+    isRunnerFailed.value = false
     emit('update-status', 'processing')
     startStatusPolling()
     startDetailPolling()
@@ -765,11 +794,13 @@ const fetchRunStatus = async () => {
       if (isFailed) {
         addLog(t('log.simFailed') + (data.error ? `: ${data.error}` : ''))
         phase.value = 2
+        isRunnerFailed.value = true
         stopPolling()
         emit('update-status', 'error')
       } else if (isCompleted) {
         addLog(t('log.simCompleted'))
         phase.value = 2
+        isRunnerFailed.value = false
         stopPolling()
         emit('update-status', 'completed')
       }
@@ -1257,6 +1288,29 @@ onUnmounted(() => {
 .action-btn:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+}
+
+/* aria-disabled dipakai (bukan native disabled) supaya tombol tetap ada di
+   tab-order buat keyboard/screen-reader user — tampilan visual disamakan
+   dengan :disabled, klik-nya diblok manual di handler-nya. */
+.action-btn[aria-disabled="true"] {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.action-btn.secondary[aria-disabled="true"]:hover {
+  background: #FFF;
+  border-color: #DDD;
+}
+
+/* Alasan lock — teks yang KELIHATAN di layar, bukan cuma title/tooltip
+   (beberapa browser/screen-reader tidak menunjukkan title pada elemen
+   yang locked). aria-describedby tombol Restart & Back menunjuk ke sini. */
+.lock-reason-text {
+  font-size: 11px;
+  color: #999;
+  max-width: 220px;
+  line-height: 1.4;
 }
 
 /* --- Ingestion progress / safe-to-stop banner --- */
