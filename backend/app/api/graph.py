@@ -5,6 +5,7 @@
 
 import os
 import re
+import json
 import traceback
 import threading
 from contextlib import ExitStack, nullcontext
@@ -25,6 +26,7 @@ from ..models.project import ProjectManager, ProjectStatus
 from ..services.simulation_manager import SimulationManager
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
 from ..services.zep_graph_memory_updater import ZepGraphMemoryManager
+from ..services.report_agent import ReportManager, ReportStatus
 from ..utils.llm_client import LLMResponseError
 
 # 获取日志器
@@ -35,6 +37,74 @@ _build_locks_guard = threading.Lock()
 
 class GraphInUseError(RuntimeError):
     pass
+
+
+# Terminal runner states that mean the run is no longer genuinely in
+# progress and never produced (or will produce) a replayable write. These
+# are treated as "inactive" for graph-lifecycle purposes, same as FAILED:
+# CRASHED (process vanished without an exit code) and NEEDS_ATTENTION
+# (auto-retried once, still failed) are both dead ends, not something
+# reset/delete should wait on forever.
+_INACTIVE_RUNNER_STATUSES = {
+    RunnerStatus.FAILED,
+    RunnerStatus.CRASHED,
+    RunnerStatus.NEEDS_ATTENTION,
+}
+
+
+def _index_reports_by_simulation() -> dict:
+    """Scan REPORTS_DIR exactly once and index reports by simulation_id.
+
+    `ReportManager.get_report_by_simulation()` does its own full directory
+    scan (listdir + open + json.load every report on disk) on EVERY call.
+    Called once per COMPLETED simulation inside `_active_graph_consumers`'s
+    loop, that becomes an O(completed_simulations_in_project x
+    total_reports_on_disk) scan across the WHOLE reports directory, not just
+    this project's. Build the index once here instead and reuse it for every
+    simulation in the loop.
+
+    A single corrupt report file (bad JSON, missing keys) anywhere in the
+    directory must not block reset/delete for every OTHER project that has a
+    COMPLETED simulation. This is only an existence/status check, not a real
+    read of report content, so a corrupt file is quarantined (logged, then
+    skipped) rather than allowed to raise out of this function.
+    """
+    index: dict = {}
+    try:
+        entries = os.listdir(ReportManager.REPORTS_DIR)
+    except OSError as error:
+        logger.warning(
+            "Nggak bisa listdir REPORTS_DIR buat index consumer graph: %s", error
+        )
+        return index
+
+    for entry in entries:
+        entry_path = os.path.join(ReportManager.REPORTS_DIR, entry)
+        if os.path.isdir(entry_path):
+            report_id = entry
+        elif entry.endswith(".json"):
+            report_id = entry[:-5]
+        else:
+            continue
+        try:
+            report = ReportManager.get_report(report_id)
+        except (json.JSONDecodeError, KeyError, OSError) as error:
+            logger.warning(
+                "Report corrupt dilewati saat index consumer graph: "
+                "report_id=%s alasan=%s: %s",
+                report_id,
+                type(error).__name__,
+                error,
+            )
+            continue
+        if report is None:
+            continue
+        # Keep the newest report per simulation, matching
+        # ReportManager.list_reports()'s created_at-desc ordering.
+        existing = index.get(report.simulation_id)
+        if existing is None or report.created_at >= existing.created_at:
+            index[report.simulation_id] = report
+    return index
 
 
 def _active_graph_consumers(graph_id: str) -> list[str]:
@@ -49,7 +119,7 @@ def _active_graph_consumers(graph_id: str) -> list[str]:
             continue
         try:
             run_state = SimulationRunner.get_run_state(simulation_id)
-            if run_state and run_state.runner_status == RunnerStatus.FAILED:
+            if run_state and run_state.runner_status in _INACTIVE_RUNNER_STATUSES:
                 # reset/delete is the explicit recovery path for an incomplete,
                 # non-replayable write. Serialize it against a retry drain.
                 ZepGraphMemoryManager.discard_inactive_updater(simulation_id)
@@ -64,12 +134,28 @@ def _active_graph_consumers(graph_id: str) -> list[str]:
         RunnerStatus.PAUSED,
         RunnerStatus.STOPPING,
     }
+    report_index = None
     for simulation in SimulationManager().list_simulations():
         if simulation.graph_id != graph_id:
             continue
         run_state = SimulationRunner.get_run_state(simulation.simulation_id)
-        if run_state and run_state.runner_status in active_runner_statuses:
+        if not run_state:
+            continue
+        if run_state.runner_status in active_runner_statuses:
             active.add(simulation.simulation_id)
+        elif run_state.runner_status == RunnerStatus.COMPLETED:
+            # A COMPLETED run's report can still be queried (chat/tools) long
+            # after the run itself finished. Only a report that actually
+            # FINISHED generating (status COMPLETED) means the graph it
+            # points to is genuinely still in use — save_report() persists a
+            # FAILED report to disk too (see api/report.py), so a truthy
+            # "report exists" check would block reset/delete forever over a
+            # report that never produced anything usable.
+            if report_index is None:
+                report_index = _index_reports_by_simulation()
+            report = report_index.get(simulation.simulation_id)
+            if report is not None and report.status == ReportStatus.COMPLETED:
+                active.add(simulation.simulation_id)
     return sorted(active)
 
 
