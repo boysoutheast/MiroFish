@@ -2,8 +2,7 @@
 
 Cakupan uji:
 1. PID mati -> ditandai CRASHED (dengan error message & completed_at terisi).
-2. PID hidup DAN create_time cocok -> TIDAK disentuh (arah sebaliknya, yang
-   paling penting: cegah salah-tandai simulasi yang genuinely masih jalan).
+2. PID hidup DAN create_time cocok, tanpa monitor (yatim) -> dihentikan, CRASHED.
 3. PID-reuse: PID exists=True tapi create_time BEDA -> tetap CRASHED (karena
    itu bukan proses kita, proses lain yang kebetulan reuse PID).
 4. Status non-live (IDLE/COMPLETED/dst) -> dilewati, tidak disentuh.
@@ -23,8 +22,10 @@ import pytest
 
 from app.config import Config
 from app.services.simulation_reconciler import (
+    _classify,
     _process_is_ours,
     _reconcile_one,
+    _retry_crashed_simulations,
     reconcile_on_startup,
 )
 from app.services.simulation_runner import RunnerStatus, SimulationRunner
@@ -118,10 +119,13 @@ def test_reconcile_one_dead_pid_marks_crashed():
 
 
 # ---------------------------------------------------------------------------
-# 2. PID hidup + create_time cocok -> TIDAK disentuh (arah sebaliknya)
+# 2. PID hidup + create_time cocok, tanpa monitor (yatim) -> dihentikan, CRASHED
 # ---------------------------------------------------------------------------
 
-def test_reconcile_one_alive_matching_process_untouched():
+def test_reconcile_one_alive_matching_orphan_killed_and_crashed(tmp_path, monkeypatch):
+    monkeypatch.setattr(SimulationRunner, "RUN_STATE_DIR", str(tmp_path))
+    # Perilaku lama ("yatim dibiarkan") diganti: yatim milik kita (tanpa
+    # monitor) dihentikan lalu CRASHED. Detail di test_orphan_alive.py.
     simulation_id = "sim_t1_alive_match"
     proc, created_at = _spawn_dummy_process()
     try:
@@ -132,15 +136,15 @@ def test_reconcile_one_alive_matching_process_untouched():
             process_started_at=created_at,
         )
         result = _reconcile_one(simulation_id)
-        assert result == "orphan_alive"
+        assert result == "crashed"
 
         state = SimulationRunner._load_run_state(simulation_id)
-        assert state.runner_status == RunnerStatus.RUNNING
-        assert state.completed_at is None
-        assert state.error is None
+        assert state.runner_status == RunnerStatus.CRASHED
+        proc.wait(timeout=5)  # benar-benar mati
     finally:
-        proc.kill()
-        proc.wait(timeout=5)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
         _cleanup(simulation_id)
 
 
@@ -220,30 +224,37 @@ def test_reconcile_on_startup_survives_per_simulation_exception():
     ok_id = "sim_t1_ok_after_error"
     _write_run_state(ok_id, runner_status="running", process_pid=999999999)
     try:
+        # Retry background dijalankan sinkron (tidak race dengan cleanup).
         with mock.patch(
+            "app.services.simulation_reconciler._spawn_retry_worker_thread",
+            side_effect=lambda ids: _retry_crashed_simulations(ids),
+        ), mock.patch(
             "app.services.simulation_reconciler._iter_simulation_ids",
             return_value=iter(["sim_t1_does_not_exist_on_disk", ok_id]),
         ):
             # sim_t1_does_not_exist_on_disk -> _load_run_state returns None ->
             # skipped_no_state, bukan exception. Untuk benar2 memicu exception
             # per-sim, paksa _reconcile_one meledak untuk id pertama saja.
-            real_reconcile_one = _reconcile_one
+            real_classify = _classify
 
             def flaky(simulation_id):
                 if simulation_id == "sim_t1_does_not_exist_on_disk":
                     raise RuntimeError("simulated corrupt run_state.json")
-                return real_reconcile_one(simulation_id)
+                return real_classify(simulation_id)
 
             with mock.patch(
-                "app.services.simulation_reconciler._reconcile_one",
+                "app.services.simulation_reconciler._classify",
                 side_effect=flaky,
             ):
                 reconcile_on_startup()
 
-        # Simulasi kedua (ok_id, PID mati) tetap ke-reconcile jadi CRASHED
-        # walau simulasi pertama meledak.
+        # Simulasi kedua (ok_id, PID mati) tetap ke-reconcile walau simulasi
+        # pertama meledak: CRASHED lalu (tanpa start_params) NEEDS_ATTENTION
+        # oleh T2 -- bukti dia diproses.
         state = SimulationRunner._load_run_state(ok_id)
-        assert state.runner_status == RunnerStatus.CRASHED
+        assert state.runner_status in (
+            RunnerStatus.CRASHED, RunnerStatus.NEEDS_ATTENTION
+        )
     finally:
         _cleanup(ok_id)
 

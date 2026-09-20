@@ -42,9 +42,12 @@ nanti ubah topology deploy — tambahkan cross-process lock di
 _retry_crashed_simulations()/_retry_one() sebelum multi-worker diaktifkan.
 """
 
+import fcntl
 import glob
 import os
+import signal
 import threading
+import time
 from datetime import datetime
 from typing import List, Optional
 
@@ -125,43 +128,191 @@ def _process_is_ours(pid: Optional[int], expected_started_at: Optional[float]) -
     return abs(actual_started_at - expected_started_at) < _CREATE_TIME_TOLERANCE_SECONDS
 
 
-def _reconcile_one(simulation_id: str) -> str:
-    """Reconcile satu simulasi. Return salah satu:
-    'crashed' | 'orphan_alive' | 'skipped_no_state' | 'skipped_not_live'.
-    """
+# Batas TOTAL (bukan per-yatim) untuk seluruh batch yatim: SIGTERM ke semua
+# dulu, tunggu bersama sampai grace habis, lalu SIGKILL sisanya dan tunggu
+# bersama sampai kill-wait habis. Konstanta modul supaya tes bisa patch.
+_ORPHAN_KILL_GRACE_SECONDS = 10.0
+_ORPHAN_KILL_WAIT_SECONDS = 5.0
+_POLL_INTERVAL_SECONDS = 0.1
+_LOCK_FILENAME = ".reconcile.lock"
+
+
+def _is_dead(proc: "psutil.Process") -> bool:
+    try:
+        return proc.status() == psutil.STATUS_ZOMBIE or not proc.is_running()
+    except psutil.NoSuchProcess:
+        return True
+
+
+def _is_protected_pid(pid: int) -> bool:
+    """True kalau PID ini TIDAK boleh disinyal: proses kita sendiri, induk
+    kita (mis. reloader/supervisor), atau satu process group dengan kita
+    (killpg akan menembak diri sendiri)."""
+    if pid in (os.getpid(), os.getppid()):
+        return True
+    try:
+        return os.getpgid(pid) == os.getpgrp()
+    except (ProcessLookupError, OSError):
+        return False
+
+
+def _is_group_leader(pid: int) -> bool:
+    try:
+        return os.getpgid(pid) == pid
+    except (ProcessLookupError, OSError):
+        return False
+
+
+def _signal_orphan(proc: "psutil.Process", pid: int, sig: int) -> None:
+    """Kirim sinyal ke process group kalau proses itu leader grup (di-spawn
+    start_new_session=True), kalau tidak ke prosesnya saja."""
+    if _is_group_leader(pid):
+        try:
+            os.killpg(pid, sig)
+            return
+        except (ProcessLookupError, OSError):
+            pass
+    proc.send_signal(sig)
+
+
+def _signal_target(target: dict, sig: int) -> None:
+    """Sinyal proses utama; kalau BUKAN leader grup, anak-anaknya (rekursif,
+    dicatat sebelum sinyal pertama) juga disinyal."""
+    pid = target["pid"]
+    _signal_orphan(target["proc"], pid, sig)
+    for child in target["children"]:
+        try:
+            if not _is_protected_pid(child.pid):
+                child.send_signal(sig)
+        except psutil.NoSuchProcess:
+            pass
+
+
+def _target_dead(target: dict) -> bool:
+    return _is_dead(target["proc"]) and all(_is_dead(c) for c in target["children"])
+
+
+def _wait_all_dead(targets: List[dict], seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if all(_target_dead(t) for t in targets):
+            return
+        time.sleep(_POLL_INTERVAL_SECONDS)
+
+
+def _terminate_orphans(items: List[tuple]) -> dict:
+    """Hentikan banyak proses yatim sekaligus. `items` = [(pid,
+    expected_started_at)]. Return {pid: bool}; True = proses (PID+create_time
+    yang sama) sudah mati / bukan proses kita, False = gagal / ditolak.
+    Waktu total dibatasi (SIGTERM ke semua -> tunggu bersama -> SIGKILL
+    sisanya -> tunggu bersama), bukan N x grace. Verifikasi create_time
+    diulang sebelum SIGKILL (anti PID-reuse)."""
+    results: dict = {}
+    targets: List[dict] = []
+    for pid, started_at in items:
+        try:
+            if not _process_is_ours(pid, started_at):
+                results[pid] = True
+                continue
+            if _is_protected_pid(pid):
+                logger.error(
+                    "Menolak membunuh pid=%s: itu proses kita sendiri / induk "
+                    "/ satu process group dengan kita.", pid,
+                )
+                results[pid] = False
+                continue
+            proc = psutil.Process(pid)
+            children = [] if _is_group_leader(pid) else proc.children(recursive=True)
+            target = {"pid": pid, "started_at": started_at, "proc": proc,
+                      "children": children}
+            _signal_target(target, signal.SIGTERM)
+            targets.append(target)
+        except psutil.NoSuchProcess:
+            results[pid] = True
+        except Exception:
+            logger.exception("Gagal menghentikan proses yatim: pid=%s", pid)
+            results[pid] = False
+
+    _wait_all_dead(targets, _ORPHAN_KILL_GRACE_SECONDS)
+
+    stubborn = []
+    for t in targets:
+        if _target_dead(t):
+            results[t["pid"]] = True
+            continue
+        try:
+            if not _process_is_ours(t["pid"], t["started_at"]):
+                results[t["pid"]] = _is_dead(t["proc"])
+                continue
+            _signal_target(t, signal.SIGKILL)
+            stubborn.append(t)
+        except psutil.NoSuchProcess:
+            results[t["pid"]] = True
+        except Exception:
+            logger.exception("Gagal SIGKILL proses yatim: pid=%s", t["pid"])
+            results[t["pid"]] = False
+
+    _wait_all_dead(stubborn, _ORPHAN_KILL_WAIT_SECONDS)
+    for t in stubborn:
+        results[t["pid"]] = _target_dead(t)
+    return results
+
+
+def _terminate_orphan(pid: Optional[int], expected_started_at: Optional[float]) -> bool:
+    """Versi satu-proses dari _terminate_orphans()."""
+    return _terminate_orphans([(pid, expected_started_at)])[pid]
+
+
+def _classify(simulation_id: str):
+    """('done', hasil) kalau sudah final, atau ('orphan', state) kalau yatim
+    milik kita yang harus dihentikan dulu."""
     state = SimulationRunner._load_run_state(simulation_id)
     if state is None:
-        return "skipped_no_state"
+        return "done", "skipped_no_state"
 
     if state.runner_status not in _LIVE_STATUSES:
-        return "skipped_not_live"
+        return "done", "skipped_not_live"
 
     if _process_is_ours(state.process_pid, state.process_started_at):
-        # Proses beneran masih hidup, tapi backend yang baru nyala ini tidak
-        # punya monitor thread buat dia (thread lama mati bareng proses
-        # lama). Ini "yatim" — dibiarkan jalan sendiri sampai selesai/gagal
-        # natural. Re-attach monitor ada di luar scope T1.
+        monitor = SimulationRunner._monitor_threads.get(simulation_id)
+        if monitor is not None and monitor.is_alive():
+            # Ada monitor thread terdaftar di proses ini -> BUKAN yatim,
+            # ada yang mengawasi. Jangan disentuh.
+            logger.warning(
+                "Simulasi hidup dengan monitor thread terdaftar, tidak "
+                "disentuh: simulation_id=%s, pid=%s",
+                simulation_id,
+                state.process_pid,
+            )
+            return "done", "monitored_alive"
         logger.warning(
-            "Simulasi yatim terdeteksi saat reconciliation: simulation_id=%s, "
-            "pid=%s, runner_status=%s — proses masih hidup tapi TIDAK ada "
-            "monitor thread yang mengawasi (backend baru saja restart). "
-            "Dibiarkan jalan sendiri, TIDAK dibunuh, TIDAK di-retry.",
+            "Simulasi yatim terdeteksi: simulation_id=%s, pid=%s, "
+            "runner_status=%s — dihentikan lalu ditandai CRASHED.",
             simulation_id,
             state.process_pid,
             state.runner_status.value,
         )
-        return "orphan_alive"
+        return "orphan", state
 
-    # PID mati, atau PID hidup tapi bukan proses kita (reuse) -> CRASHED.
-    from datetime import datetime
+    return "crashed_now", state
 
+
+def _finalize(state: SimulationRunState, orphan_killed: bool) -> str:
+    """Tandai CRASHED (PID mati / reuse / yatim yang sudah dihentikan)."""
+    simulation_id = state.simulation_id
     status_before_crash = state.runner_status
     state.runner_status = RunnerStatus.CRASHED
     state.completed_at = datetime.now().isoformat()
-    state.error = (
-        "Proses mati tanpa terdeteksi, kemungkinan server restart "
-        f"(pid={state.process_pid}, process_started_at={state.process_started_at})."
-    )
+    if orphan_killed:
+        state.error = (
+            "Proses yatim (tanpa monitor setelah server restart) dihentikan "
+            f"(pid={state.process_pid}, process_started_at={state.process_started_at})."
+        )
+    else:
+        state.error = (
+            "Proses mati tanpa terdeteksi, kemungkinan server restart "
+            f"(pid={state.process_pid}, process_started_at={state.process_started_at})."
+        )
     state.twitter_running = False
     state.reddit_running = False
     SimulationRunner._save_run_state(state)
@@ -178,35 +329,96 @@ def _reconcile_one(simulation_id: str) -> str:
     return "crashed"
 
 
+def _finalize_orphan(state: SimulationRunState, killed: bool) -> str:
+    if killed:
+        return _finalize(state, orphan_killed=True)
+    pid = state.process_pid
+    _mark_needs_attention(
+        state,
+        f"Proses simulasi yatim gagal dihentikan (pid={pid}) — TIDAK "
+        "di-retry supaya tidak ada dua simulasi bersamaan untuk "
+        f"simulation_id yang sama. Matikan manual: `kill -9 {pid}` "
+        "(pastikan itu proses simulasi, bukan proses lain), lalu "
+        "start ulang simulasinya.",
+    )
+    return "needs_attention"
+
+
+def _reconcile_one(simulation_id: str) -> str:
+    """Reconcile satu simulasi. Return salah satu:
+    'crashed' | 'monitored_alive' | 'needs_attention' | 'skipped_no_state' | 'skipped_not_live'.
+    """
+    kind, payload = _classify(simulation_id)
+    if kind == "done":
+        return payload
+    if kind == "crashed_now":
+        return _finalize(payload, orphan_killed=False)
+    pid = payload.process_pid
+    killed = _terminate_orphans([(pid, payload.process_started_at)])[pid]
+    return _finalize_orphan(payload, killed)
+
+
 def _reconcile_on_startup_impl() -> None:
     counts = {
         "crashed": 0,
-        "orphan_alive": 0,
+        "monitored_alive": 0,
+        "needs_attention": 0,
         "skipped_not_live": 0,
         "skipped_no_state": 0,
         "errored": 0,
     }
     newly_crashed_ids: List[str] = []
+    orphans: List[SimulationRunState] = []
 
+    def _tally(result: str, simulation_id: str) -> None:
+        counts[result] = counts.get(result, 0) + 1
+        if result == "crashed":
+            newly_crashed_ids.append(simulation_id)
+
+    def _log_error(simulation_id: str) -> None:
+        counts["errored"] += 1
+        logger.exception(
+            "reconcile gagal untuk satu simulasi, lanjut ke simulasi "
+            "berikutnya: simulation_id=%s",
+            simulation_id,
+        )
+
+    # Fase 1: klasifikasi semua simulasi (PID mati langsung ditandai CRASHED).
     for simulation_id in _iter_simulation_ids():
         try:
-            result = _reconcile_one(simulation_id)
-            counts[result] = counts.get(result, 0) + 1
-            if result == "crashed":
-                newly_crashed_ids.append(simulation_id)
+            kind, payload = _classify(simulation_id)
+            if kind == "done":
+                _tally(payload, simulation_id)
+            elif kind == "crashed_now":
+                _tally(_finalize(payload, orphan_killed=False), simulation_id)
+            else:
+                orphans.append(payload)
         except Exception:
-            counts["errored"] += 1
-            logger.exception(
-                "reconcile gagal untuk satu simulasi, lanjut ke simulasi "
-                "berikutnya: simulation_id=%s",
-                simulation_id,
+            _log_error(simulation_id)
+
+    # Fase 2: hentikan SEMUA yatim bersamaan (waktu total terbatas, bukan
+    # N x grace) supaya startup tidak terblokir serial.
+    if orphans:
+        try:
+            killed_by_pid = _terminate_orphans(
+                [(o.process_pid, o.process_started_at) for o in orphans]
             )
+        except Exception:
+            logger.exception("Gagal menghentikan batch yatim")
+            killed_by_pid = {}
+        for state in orphans:
+            try:
+                killed = killed_by_pid.get(state.process_pid, False)
+                _tally(_finalize_orphan(state, killed), state.simulation_id)
+            except Exception:
+                _log_error(state.simulation_id)
 
     logger.info(
-        "reconcile_on_startup selesai: crashed=%d, orphan_alive=%d, "
+        "reconcile_on_startup selesai: crashed=%d, monitored_alive=%d, needs_attention=%d, "
         "skipped_not_live=%d, skipped_no_state=%d, errored=%d",
         counts["crashed"],
-        counts["orphan_alive"],
+        counts["monitored_alive"],
+        counts["needs_attention"],
         counts["skipped_not_live"],
         counts["skipped_no_state"],
         counts["errored"],
@@ -226,11 +438,36 @@ def reconcile_on_startup() -> None:
     STOPPING), verifikasi PID+create_time beneran, tandai CRASHED yang
     ternyata sudah mati.
 
+    Dilewati kalau (a) ini proses induk reloader Werkzeug
+    (WERKZEUG_RUN_MAIN ada dan != "true"), atau (b) proses lain memegang file
+    lock `.reconcile.lock` di RUN_STATE_DIR (sedang/telah reconcile).
+
     TIDAK BOLEH melempar exception — kegagalan reconciliation harus TETAP
     membiarkan backend nyala. Simulasi yang salah-tandai lebih baik daripada
     backend yang gagal start sama sekali.
     """
+    reloader_flag = os.environ.get("WERKZEUG_RUN_MAIN")
+    if reloader_flag is not None and reloader_flag != "true":
+        logger.info(
+            "reconcile_on_startup dilewati: proses induk reloader "
+            "(WERKZEUG_RUN_MAIN=%r).", reloader_flag,
+        )
+        return
+
+    lock_file = None
     try:
+        try:
+            os.makedirs(SimulationRunner.RUN_STATE_DIR, exist_ok=True)
+            lock_file = open(
+                os.path.join(SimulationRunner.RUN_STATE_DIR, _LOCK_FILENAME), "w"
+            )
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as error:
+            logger.warning(
+                "reconcile_on_startup dilewati: lock %s tidak didapat (%s) — "
+                "proses lain sedang/telah reconcile.", _LOCK_FILENAME, error,
+            )
+            return
         _reconcile_on_startup_impl()
     except Exception:
         logger.exception(
@@ -238,6 +475,9 @@ def reconcile_on_startup() -> None:
             "tanpa reconciliation selesai. Simulasi yang stuck tidak akan "
             "ditandai CRASHED sampai reconciliation berikutnya berhasil."
         )
+    finally:
+        if lock_file is not None:
+            lock_file.close()  # menutup fd melepas flock
 
 
 # =============================================================================
