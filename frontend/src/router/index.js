@@ -52,6 +52,10 @@ const router = createRouter({
 
 // Mode viewer: bawa `?viewer=1` ke setiap navigasi supaya tidak hilang di tengah alur.
 router.beforeEach((to) => {
+  // Viewer read-only: layar chat/survei (Step 5) memicu panggilan LLM, jadi tidak boleh dibuka.
+  if (markViewerFromQuery(to.query) && to.name === 'Interaction') {
+    return { name: 'Report', params: { reportId: to.params.reportId }, query: { viewer: '1' }, replace: true }
+  }
   if (markViewerFromQuery(to.query) && to.query.viewer !== '1') {
     return { path: to.path, query: { ...to.query, viewer: '1' }, hash: to.hash, replace: true }
   }

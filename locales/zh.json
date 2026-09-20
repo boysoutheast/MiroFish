@@ -80,6 +80,25 @@
       "深度互动"
     ]
   },
+  "header": {
+    "step": "步骤 {n}/5",
+    "statusRunning": "运行中",
+    "statusWrapping": "收尾中",
+    "statusCompleted": "已完成",
+    "statusReady": "就绪",
+    "statusError": "错误",
+    "statusProcessing": "处理中",
+    "statusGenerating": "生成本体中",
+    "statusBuilding": "构建图谱中",
+    "statusInitializing": "初始化中",
+    "statusGeneratingReport": "报告生成中",
+    "statusWaiting": "等待数据",
+    "predictionReport": "预测报告",
+    "sectionsPlanned": "已规划 {n} 个章节",
+    "sectionDone": "章节完成",
+    "statusWrappingSlow": "仍在收尾，请稍候",
+    "statusNeedsAttention": "需要关注"
+  },
   "step1": {
     "ontologyGeneration": "本体生成",
     "ontologyCompleted": "已完成",
@@ -711,6 +730,7 @@
     "statusRecovering": "正在自动恢复，请稍候…",
     "statusNeedsAttention": "本次运行需要我们团队处理，您无需再做任何操作。",
     "statusFailed": "模拟意外停止。",
+    "ingestionSafe": "数据已安全保存，报告将自动生成。",
     "progress": "第 {current} / {total} 轮",
     "processWaiting": "正在自动构建知识图谱…",
     "processGraphReady": "知识图谱已就绪，正在自动设置模拟。",

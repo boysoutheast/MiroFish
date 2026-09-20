@@ -22,11 +22,11 @@
         <LanguageSwitcher />
         <div class="step-divider"></div>
         <div class="workflow-step">
-          <span class="step-num">Step 3/5</span>
+          <span class="step-num">{{ $t('header.step', { n: 3 }) }}</span>
           <span class="step-name">{{ $tm('main.stepNames')[2] }}</span>
         </div>
         <div class="step-divider"></div>
-        <span class="status-indicator" :class="statusClass">
+        <span class="status-indicator" :class="statusClass" role="status" aria-live="polite">
           <span class="dot"></span>
           {{ statusText }}
         </span>
@@ -72,7 +72,7 @@ import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step3Simulation from '../components/Step3Simulation.vue'
 import { getProject, getGraphData } from '../api/graph'
-import { isViewerMode } from '../utils/viewerMode'
+import { isViewerMode, defaultViewMode } from '../utils/viewerMode'
 import { getSimulation, getSimulationConfig, stopSimulation, closeSimulationEnv, getEnvStatus } from '../api/simulation'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 import { useI18n } from 'vue-i18n'
@@ -87,7 +87,7 @@ const props = defineProps({
 })
 
 // Layout State
-const viewMode = ref('split')
+const viewMode = ref(defaultViewMode('split'))
 
 // Data State
 const currentSimulationId = ref(route.params.simulationId)
@@ -115,16 +115,20 @@ const rightPanelStyle = computed(() => {
 
 // --- Status Computed ---
 const statusClass = computed(() => {
+  if (['wrapping', 'wrapping-slow'].includes(currentStatus.value)) return 'processing'
   return currentStatus.value
 })
 
 const statusText = computed(() => {
-  if (currentStatus.value === 'error') return 'Error'
-  if (currentStatus.value === 'completed') return 'Completed'
-  return 'Running'
+  if (currentStatus.value === 'error') return t('header.statusError')
+  if (currentStatus.value === 'completed') return t('header.statusCompleted')
+  if (currentStatus.value === 'wrapping') return t('header.statusWrapping')
+  if (currentStatus.value === 'wrapping-slow') return t('header.statusWrappingSlow')
+  if (currentStatus.value === 'attention') return t('header.statusNeedsAttention')
+  return t('header.statusRunning')
 })
 
-const isSimulating = computed(() => currentStatus.value === 'processing')
+const isSimulating = computed(() => ['processing', 'wrapping', 'wrapping-slow'].includes(currentStatus.value))
 
 // --- Helpers ---
 const addLog = (msg) => {
@@ -459,6 +463,8 @@ onUnmounted(() => {
 .status-indicator.processing .dot { background: #FF5722; animation: pulse 1s infinite; }
 .status-indicator.completed .dot { background: #4CAF50; }
 .status-indicator.error .dot { background: #F44336; }
+.status-indicator.idle .dot { background: #9E9E9E; box-shadow: 0 0 0 2px #E0E0E0; }
+.status-indicator.attention .dot { background: #F59E0B; }
 
 @keyframes pulse { 50% { opacity: 0.5; } }
 

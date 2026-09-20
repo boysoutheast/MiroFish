@@ -1,5 +1,5 @@
 <template>
-  <div class="report-panel">
+  <div class="report-panel" :class="{ 'is-viewer': viewer }">
     <!-- Main Split Layout -->
     <div class="main-split-layout">
       <!-- LEFT PANEL: Report Style -->
@@ -8,10 +8,10 @@
           <!-- Report Header -->
           <div class="report-header-block">
             <div class="report-meta">
-              <span class="report-tag">Prediction Report</span>
-              <span class="report-id">ID: {{ reportId || 'REF-2024-X92' }}</span>
+              <span class="report-tag">{{ t('header.predictionReport') }}</span>
+              <span v-if="reportId && !viewer" class="report-id">ID: {{ reportId }}</span>
               <a
-                v-if="reportId"
+                v-if="reportId && !viewer"
                 class="action-btn download-report-link"
                 :href="`/api/report/${reportId}/download`"
                 download
@@ -83,7 +83,7 @@
       </div>
 
       <!-- RIGHT PANEL: Workflow Timeline -->
-      <div class="right-panel" ref="rightPanel">
+      <div v-if="!viewer" class="right-panel" ref="rightPanel">
         <div class="panel-header" :class="`panel-header--${activeStep.status}`" v-if="!isComplete">
           <span class="header-dot" v-if="activeStep.status === 'active'"></span>
           <span class="header-index mono">{{ activeStep.noLabel }}</span>
@@ -134,7 +134,7 @@
           </div>
 
           <!-- Next Step Button - 在完成后显示 -->
-          <button v-if="isComplete" class="next-step-btn" @click="goToInteraction">
+          <button v-if="isComplete && !viewer" class="next-step-btn" @click="goToInteraction">
             <span>{{ $t('step4.goToInteraction') }}</span>
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -188,7 +188,7 @@
                   <template v-if="log.action === 'planning_complete'">
                     <div class="status-message success">{{ log.details?.message }}</div>
                     <div class="outline-badge" v-if="log.details?.outline">
-                      {{ log.details.outline.sections?.length || 0 }} sections planned
+                      {{ t('header.sectionsPlanned', { n: log.details.outline.sections?.length || 0 }) }}
                     </div>
                   </template>
 
@@ -381,7 +381,7 @@
     </div>
 
     <!-- Bottom Console Logs -->
-    <div class="console-logs">
+    <div v-if="!viewer" class="console-logs">
       <div class="log-header">
         <span class="log-title">CONSOLE OUTPUT</span>
         <span class="log-id">{{ reportId || 'NO_REPORT' }}</span>
@@ -400,9 +400,11 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick, h, reactive } f
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { getAgentLog, getConsoleLog } from '../api/report'
+import { useViewerMode } from '../utils/viewerMode'
 
 const router = useRouter()
 const { t } = useI18n()
+const { viewer } = useViewerMode()
 
 const props = defineProps({
   reportId: String,
@@ -414,6 +416,7 @@ const emit = defineEmits(['add-log', 'update-status'])
 
 // Navigation
 const goToInteraction = () => {
+  if (viewer.value) return
   if (props.reportId) {
     router.push({ name: 'Interaction', params: { reportId: props.reportId } })
   }
@@ -2007,7 +2010,7 @@ const getActionLabel = (action) => {
     'planning_complete': 'Plan Complete',
     'section_start': 'Section Start',
     'section_content': 'Content Ready',
-    'section_complete': 'Section Done',
+    'section_complete': t('header.sectionDone'),
     'tool_call': 'Tool Call',
     'tool_result': 'Tool Result',
     'llm_response': 'LLM Response',
@@ -5169,5 +5172,17 @@ watch(() => props.reportId, (newId) => {
 /* English locale: smaller report title */
 html[lang="en"] .report-header-block .main-title {
   font-size: 28px;
+}
+
+/* Viewer: panel kanan (log alur kerja agen) tidak dirender; laporan mengisi lebar penuh. */
+.is-viewer .report-panel .left-panel.report-style {
+  flex: 1 1 auto; width: 100%; min-width: 0; border-right: none;
+  padding-left: max(50px, calc((100% - 880px) / 2));
+  padding-right: max(50px, calc((100% - 880px) / 2));
+}
+
+/* Ponsel (viewer): laporan selebar layar. */
+@media (max-width: 768px) {
+  .is-viewer .report-panel .left-panel.report-style { padding: 20px 16px 40px; }
 }
 </style>

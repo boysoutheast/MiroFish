@@ -22,11 +22,11 @@
         <LanguageSwitcher />
         <div class="step-divider"></div>
         <div class="workflow-step">
-          <span class="step-num">Step 2/5</span>
+          <span class="step-num">{{ $t('header.step', { n: 2 }) }}</span>
           <span class="step-name">{{ $tm('main.stepNames')[1] }}</span>
         </div>
         <div class="step-divider"></div>
-        <span class="status-indicator" :class="statusClass">
+        <span class="status-indicator" :class="statusClass" role="status" aria-live="polite">
           <span class="dot"></span>
           {{ statusText }}
         </span>
@@ -91,7 +91,7 @@ import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { getProject, getGraphData } from '../api/graph'
-import { isViewerMode } from '../utils/viewerMode'
+import { isViewerMode, defaultViewMode } from '../utils/viewerMode'
 import { getSimulation, stopSimulation, getEnvStatus, closeSimulationEnv } from '../api/simulation'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 import { useI18n } from 'vue-i18n'
@@ -107,7 +107,7 @@ const props = defineProps({
 })
 
 // Layout State
-const viewMode = ref('split')
+const viewMode = ref(defaultViewMode('split'))
 
 // Data State
 const currentSimulationId = ref(route.params.simulationId)
@@ -139,9 +139,9 @@ const statusClass = computed(() => {
 })
 
 const statusText = computed(() => {
-  if (currentStatus.value === 'error') return 'Error'
-  if (currentStatus.value === 'completed') return 'Ready'
-  return 'Preparing'
+  if (currentStatus.value === 'error') return t('header.statusError')
+  if (currentStatus.value === 'completed') return t('header.statusReady')
+  return t('header.statusInitializing')
 })
 
 // --- Helpers ---

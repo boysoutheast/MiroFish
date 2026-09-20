@@ -22,11 +22,11 @@
         <LanguageSwitcher />
         <div class="step-divider"></div>
         <div class="workflow-step">
-          <span class="step-num">Step {{ currentStep }}/5</span>
+          <span class="step-num">{{ $t('header.step', { n: currentStep }) }}</span>
           <span class="step-name">{{ $tm('main.stepNames')[currentStep - 1] }}</span>
         </div>
         <div class="step-divider"></div>
-        <span class="status-indicator" :class="statusClass">
+        <span class="status-indicator" :class="statusClass" role="status" aria-live="polite">
           <span class="dot"></span>
           {{ statusText }}
         </span>
@@ -84,14 +84,14 @@ import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
-import { isViewerMode } from '../utils/viewerMode'
+import { isViewerMode, defaultViewMode } from '../utils/viewerMode'
 
 const route = useRoute()
 const router = useRouter()
 const { t, tm } = useI18n()
 
 // Layout State
-const viewMode = ref('split') // graph | split | workbench
+const viewMode = ref(defaultViewMode('split')) // graph | split | workbench
 
 // Step State
 const currentStep = ref(1) // 1: 图谱构建, 2: 环境搭建, 3: 开始模拟, 4: 报告生成, 5: 深度互动
@@ -127,18 +127,23 @@ const rightPanelStyle = computed(() => {
 })
 
 // --- Status Computed ---
+// Viewer tanpa project (/process/new): kondisi menunggu, bukan galat.
+const viewerNoProject = ref(false)
+
 const statusClass = computed(() => {
+  if (viewerNoProject.value) return 'idle'
   if (error.value) return 'error'
   if (currentPhase.value >= 2) return 'completed'
   return 'processing'
 })
 
 const statusText = computed(() => {
-  if (error.value) return 'Error'
-  if (currentPhase.value >= 2) return 'Ready'
-  if (currentPhase.value === 1) return 'Building Graph'
-  if (currentPhase.value === 0) return 'Generating Ontology'
-  return 'Initializing'
+  if (viewerNoProject.value) return t('header.statusWaiting')
+  if (error.value) return t('header.statusError')
+  if (currentPhase.value >= 2) return t('header.statusReady')
+  if (currentPhase.value === 1) return t('header.statusBuilding')
+  if (currentPhase.value === 0) return t('header.statusGenerating')
+  return t('header.statusInitializing')
 })
 
 // --- Helpers ---
@@ -188,7 +193,7 @@ const initProject = async () => {
   if (currentProjectId.value === 'new') {
     // Mode viewer: tidak ada upload/ontology dari sini (server yang memulai).
     if (isViewerMode()) {
-      error.value = t('viewer.noProject')
+      viewerNoProject.value = true
       return
     }
     await handleNewProject()
@@ -570,6 +575,8 @@ onUnmounted(() => {
 .status-indicator.processing .dot { background: #FF5722; animation: pulse 1s infinite; }
 .status-indicator.completed .dot { background: #4CAF50; }
 .status-indicator.error .dot { background: #F44336; }
+.status-indicator.idle .dot { background: #9E9E9E; box-shadow: 0 0 0 2px #E0E0E0; }
+.status-indicator.attention .dot { background: #F59E0B; }
 
 @keyframes pulse { 50% { opacity: 0.5; } }
 

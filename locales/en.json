@@ -80,6 +80,25 @@
       "Deep Interaction"
     ]
   },
+  "header": {
+    "step": "Step {n}/5",
+    "statusRunning": "Running",
+    "statusWrapping": "Wrapping up",
+    "statusCompleted": "Completed",
+    "statusReady": "Ready",
+    "statusError": "Error",
+    "statusProcessing": "Processing",
+    "statusGenerating": "Generating Ontology",
+    "statusBuilding": "Building Graph",
+    "statusInitializing": "Initializing",
+    "statusGeneratingReport": "Generating Report",
+    "statusWaiting": "Waiting for data",
+    "predictionReport": "Prediction Report",
+    "sectionsPlanned": "{n} sections planned",
+    "sectionDone": "Section Done",
+    "statusWrappingSlow": "Still wrapping up, please wait",
+    "statusNeedsAttention": "Needs attention"
+  },
   "step1": {
     "ontologyGeneration": "Ontology Generation",
     "ontologyCompleted": "Completed",
@@ -711,6 +730,7 @@
     "statusRecovering": "Recovering automatically, please wait…",
     "statusNeedsAttention": "This run needs attention from our team. Nothing else is required from you.",
     "statusFailed": "The simulation stopped unexpectedly.",
+    "ingestionSafe": "Data is safely saved. The report will be compiled automatically.",
     "progress": "Round {current} of {total}",
     "processWaiting": "Setting up the knowledge graph automatically…",
     "processGraphReady": "Knowledge graph is ready. The simulation is being set up automatically.",

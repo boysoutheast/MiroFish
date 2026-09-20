@@ -24,11 +24,11 @@
         <LanguageSwitcher />
         <div class="step-divider"></div>
         <div class="workflow-step">
-          <span class="step-num">Step 4/5</span>
+          <span class="step-num">{{ $t('header.step', { n: 4 }) }}</span>
           <span class="step-name">{{ $tm('main.stepNames')[3] }}</span>
         </div>
         <div class="step-divider"></div>
-        <span class="status-indicator" :class="statusClass">
+        <span class="status-indicator" :class="statusClass" role="status" aria-live="polite">
           <span class="dot"></span>
           {{ statusText }}
         </span>
@@ -72,7 +72,7 @@ import Step4Report from '../components/Step4Report.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation } from '../api/simulation'
 import { getReport } from '../api/report'
-import { isViewerMode } from '../utils/viewerMode'
+import { isViewerMode, defaultViewMode } from '../utils/viewerMode'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 
 const route = useRoute()
@@ -85,7 +85,7 @@ const props = defineProps({
 })
 
 // Layout State - 默认切换到工作台视角
-const viewMode = ref('workbench')
+const viewMode = ref(defaultViewMode('workbench'))
 
 // Data State
 const currentReportId = ref(route.params.reportId)
@@ -115,9 +115,9 @@ const statusClass = computed(() => {
 })
 
 const statusText = computed(() => {
-  if (currentStatus.value === 'error') return 'Error'
-  if (currentStatus.value === 'completed') return 'Completed'
-  return 'Generating'
+  if (currentStatus.value === 'error') return t('header.statusError')
+  if (currentStatus.value === 'completed') return t('header.statusCompleted')
+  return t('header.statusGeneratingReport')
 })
 
 // --- Helpers ---

@@ -19,16 +19,38 @@ const readFromLocation = () => {
 
 let sticky = readFromLocation()
 
+/** Tandai root <html> supaya CSS responsif viewer bisa di-scope `.is-viewer` (non-viewer tak tersentuh). */
+export const applyViewerRootClass = () => {
+  try {
+    document.documentElement.classList.toggle('is-viewer', sticky || readFromLocation())
+  } catch {
+    // DOM tidak tersedia
+  }
+}
+
 export const isViewerMode = () => sticky || readFromLocation()
 
 export const markViewerFromQuery = (query) => {
-  if (query && query.viewer === '1') sticky = true
+  if (query && query.viewer === '1' && !sticky) {
+    sticky = true
+    applyViewerRootClass()
+  }
   return sticky
 }
 
 export const withViewerQuery = (location) => {
   if (!isViewerMode()) return location
   return { ...location, query: { ...(location.query || {}), viewer: '1' } }
+}
+
+/** Layout awal: di viewer pada layar sempit (ponsel) langsung Workbench, bukan split 50/50. */
+export const defaultViewMode = (fallback = 'split') => {
+  try {
+    if (isViewerMode() && window.matchMedia('(max-width: 768px)').matches) return 'workbench'
+  } catch {
+    // matchMedia tidak tersedia: pakai default
+  }
+  return fallback
 }
 
 /** Composable: nilai konstan per sesi halaman (tidak reaktif ke URL). */

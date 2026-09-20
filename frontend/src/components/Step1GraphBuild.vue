@@ -16,7 +16,7 @@
         </div>
         
         <div class="card-content">
-          <p class="api-note">POST /api/graph/ontology/generate</p>
+          <p v-if="!viewer" class="api-note">POST /api/graph/ontology/generate</p>
           <p class="description">
             {{ $t('step1.ontologyDesc') }}
           </p>
@@ -120,7 +120,7 @@
         </div>
 
         <div class="card-content">
-          <p class="api-note">POST /api/graph/build</p>
+          <p v-if="!viewer" class="api-note">POST /api/graph/build</p>
           <p class="description">
             {{ $t('step1.graphRagDesc') }}
           </p>
@@ -211,7 +211,7 @@
     </Teleport>
 
     <!-- Bottom Info / Logs -->
-    <div class="system-logs">
+    <div v-if="!viewer" class="system-logs">
       <div class="log-header">
         <span class="log-title">SYSTEM DASHBOARD</span>
         <span class="log-id">{{ projectData?.project_id || 'NO_PROJECT' }}</span>

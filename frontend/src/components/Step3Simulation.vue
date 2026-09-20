@@ -167,7 +167,7 @@
       </template>
       <template v-else>
         <span class="ingestion-text ingestion-text--safe">
-          {{ $t('step3.ingestionSafe') }}
+          {{ viewer ? $t('viewer.ingestionSafe') : $t('step3.ingestionSafe') }}
         </span>
       </template>
     </div>
@@ -339,7 +339,7 @@
     </div>
 
     <!-- Bottom Info / Logs -->
-    <div class="system-logs">
+    <div v-if="!viewer" class="system-logs">
       <div class="log-header">
         <span class="log-title">SIMULATION MONITOR</span>
         <span class="log-id">{{ simulationId || 'NO_SIMULATION' }}</span>
@@ -1059,7 +1059,36 @@ const viewerProgressText = computed(() => {
   return t('viewer.progress', { current: runStatus.value.current_round || 0, total })
 })
 
+// Header view induk ikut status nyata: 'wrapping' saat simulasi sedang ditutup,
+// 'wrapping-slow' bila penutupan > 15 mnt (sama dgn watchdog STOPPING Kanzen; tanpa klaim error),
+// 'error' / 'attention' bila runner gagal / perlu perhatian.
+const VIEWER_WRAP_SLOW_MS = 15 * 60 * 1000
+const viewerWrapSlow = ref(false)
+let viewerWrapTimer = null
+const viewerWrapping = computed(() => viewer.value && phase.value !== 2 && (
+  runStatus.value.runner_status === 'stopping' ||
+  (phase.value === 1 && isRoundsDone(runStatus.value))
+))
+watch(viewerWrapping, (wrapping) => {
+  if (viewerWrapTimer) { clearTimeout(viewerWrapTimer); viewerWrapTimer = null }
+  viewerWrapSlow.value = false
+  if (wrapping) viewerWrapTimer = setTimeout(() => { viewerWrapSlow.value = true }, VIEWER_WRAP_SLOW_MS)
+})
+const viewerHeaderStatus = computed(() => {
+  if (!viewer.value) return null
+  const status = runStatus.value.runner_status
+  if (status === 'failed') return 'error'
+  if (status === 'needs_attention') return 'attention'
+  if (viewerWrapping.value) return viewerWrapSlow.value ? 'wrapping-slow' : 'wrapping'
+  return null
+})
+watch(viewerHeaderStatus, (status) => {
+  if (status) emit('update-status', status)
+  else if (phase.value !== 2) emit('update-status', 'processing')
+})
+
 const stopViewerTimers = () => {
+  if (viewerWrapTimer) { clearTimeout(viewerWrapTimer); viewerWrapTimer = null }
   if (viewerReportTimer) { clearInterval(viewerReportTimer); viewerReportTimer = null }
   if (viewerWaitTimer) { clearInterval(viewerWaitTimer); viewerWaitTimer = null }
 }
@@ -2011,5 +2040,19 @@ onUnmounted(() => {
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   margin-right: 6px;
+}
+
+/* Ponsel: kartu platform membungkus, linimasa satu kolom (sumbu di kiri). */
+@media (max-width: 768px) {
+  .is-viewer .control-bar { padding: 10px 12px; }
+  .is-viewer .status-group { flex-wrap: wrap; width: 100%; }
+  .is-viewer .platform-status { flex: 1 1 140px; min-width: 0; }
+  .is-viewer .timeline-feed { padding: 16px 0; }
+  .is-viewer .timeline-axis { left: 14px; }
+  .is-viewer .timeline-marker { left: 14px; }
+  .is-viewer .timeline-item.twitter,
+  .is-viewer .timeline-item.reddit { padding-left: 0; padding-right: 0; justify-content: flex-start; }
+  .is-viewer .timeline-item.twitter .timeline-card,
+  .is-viewer .timeline-item.reddit .timeline-card { margin-left: 32px; margin-right: 12px; width: calc(100% - 44px); }
 }
 </style>

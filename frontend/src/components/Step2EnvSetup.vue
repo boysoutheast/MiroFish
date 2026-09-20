@@ -617,7 +617,7 @@
     </Transition>
 
     <!-- Bottom Info / Logs -->
-    <div class="system-logs">
+    <div v-if="!isViewerMode()" class="system-logs">
       <div class="log-header">
         <span class="log-title">SYSTEM DASHBOARD</span>
         <span class="log-id">{{ simulationId || 'NO_SIMULATION' }}</span>
