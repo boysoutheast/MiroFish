@@ -100,7 +100,7 @@
         </div>
       </div>
 
-      <div class="action-controls">
+      <div v-if="!viewer" class="action-controls">
         <button
           class="action-btn secondary"
           :disabled="phase !== 1 || isStopping || isStarting"
@@ -145,6 +145,11 @@
         <span v-else-if="isCrashedState" id="step3-crashed-reason" class="lock-reason-text">
           {{ crashedLockTitle }}
         </span>
+      </div>
+      <div v-else class="viewer-status" role="status" aria-live="polite">
+        <span class="viewer-status-dot" :class="viewerStatusTone" aria-hidden="true"></span>
+        <span class="viewer-status-text">{{ viewerStatusText }}</span>
+        <span v-if="viewerProgressText" class="viewer-status-progress">{{ viewerProgressText }}</span>
       </div>
     </div>
 
@@ -357,9 +362,11 @@ import {
   startSimulation,
   stopSimulation,
   getRunStatus,
-  getRunStatusDetail
+  getRunStatusDetail,
+  getSimulation
 } from '../api/simulation'
-import { generateReport } from '../api/report'
+import { generateReport, getReport } from '../api/report'
+import { useViewerMode } from '../utils/viewerMode'
 import { isRunnerAlive } from '../utils/simulationProgress'
 
 const { t } = useI18n()
@@ -379,6 +386,9 @@ const props = defineProps({
 const emit = defineEmits(['go-back', 'next-step', 'add-log', 'update-status'])
 
 const router = useRouter()
+// Mode viewer: server yang menggerakkan alur. Komponen ini hanya membaca (GET)
+// dan tidak pernah memanggil start/stop/generate/prepare/create/build.
+const { viewer } = useViewerMode()
 
 // State
 const isGeneratingReport = ref(false)
@@ -583,6 +593,7 @@ const resetAllState = () => {
 // 启动模拟
 // force=false: 正常首次启动（不清空状态）。force=true: 明确重开，会先清空所有状态/日志。
 const doStartSimulation = async ({ force = false } = {}) => {
+  if (viewer.value) return
   if (!props.simulationId) {
     addLog(t('log.errorMissingSimId'))
     return
@@ -661,7 +672,7 @@ const doStartSimulation = async ({ force = false } = {}) => {
 
 // 停止模拟
 const handleStopSimulation = async () => {
-  if (!props.simulationId) return
+  if (viewer.value || !props.simulationId) return
 
   // 记录发起 stop 时的 generation：如果 stop 请求还没 resolve 时用户已经
   // Restart（generation 会变），下面 success 分支就不应该再覆盖新一轮的状态。
@@ -713,6 +724,7 @@ const doForceRestart = async () => {
 }
 
 const handleBackClick = () => {
+  if (viewer.value) return
   if (isSimulationCompleted.value) return
   emit('go-back')
 }
@@ -1014,12 +1026,120 @@ const formatActionTime = (timestamp) => {
   }
 }
 
+// --- Mode viewer (read-only) ---
+const viewerReportReady = ref(false)
+const viewerReportFailed = ref(false)
+let viewerReportTimer = null
+let viewerWaitTimer = null
+
+const viewerStatusText = computed(() => {
+  const status = runStatus.value.runner_status
+  if (status === 'needs_attention') return t('viewer.statusNeedsAttention')
+  if (status === 'failed') return t('viewer.statusFailed')
+  if (viewerReportFailed.value) return t('viewer.reportFailed')
+  if (status === 'crashed') return t('viewer.statusRecovering')
+  if (phase.value === 2) {
+    return viewerReportReady.value ? t('viewer.statusReportReady') : t('viewer.statusReporting')
+  }
+  if (status === 'stopping' || (phase.value === 1 && isRoundsDone(runStatus.value))) return t('viewer.statusStopping')
+  if (phase.value === 1 && (status === 'running' || status === 'paused')) return t('viewer.statusRunning')
+  return t('viewer.statusPreparing')
+})
+
+const viewerStatusTone = computed(() => {
+  const status = runStatus.value.runner_status
+  if (status === 'needs_attention' || status === 'failed' || viewerReportFailed.value) return 'is-error'
+  if (phase.value === 2) return 'is-done'
+  return 'is-active'
+})
+
+const viewerProgressText = computed(() => {
+  const total = runStatus.value.total_rounds || 0
+  if (!total || phase.value === 2) return ''
+  return t('viewer.progress', { current: runStatus.value.current_round || 0, total })
+})
+
+const stopViewerTimers = () => {
+  if (viewerReportTimer) { clearInterval(viewerReportTimer); viewerReportTimer = null }
+  if (viewerWaitTimer) { clearInterval(viewerWaitTimer); viewerWaitTimer = null }
+}
+
+// GET-only: cari report yang disusun server; buka begitu selesai.
+let viewerReportInFlight = false
+const checkViewerReport = async () => {
+  if (viewerReportInFlight) return
+  viewerReportInFlight = true
+  try {
+    const simRes = await getSimulation(props.simulationId)
+    if (!isMounted) return
+    const reportId = simRes?.data?.report_id
+    if (!reportId) return
+    const repRes = await getReport(reportId)
+    if (!isMounted) return
+    if (repRes?.data?.status === 'completed') {
+      viewerReportReady.value = true
+      stopViewerTimers()
+      router.replace({ name: 'Report', params: { reportId } })
+    } else if (repRes?.data?.status === 'failed') {
+      // Berhenti polling; server/driver yang menangani, tampilkan pesan netral.
+      viewerReportFailed.value = true
+      stopViewerTimers()
+    }
+  } catch (err) {
+    console.warn('viewer: cek report gagal:', err)
+  } finally {
+    viewerReportInFlight = false
+  }
+}
+
+watch(() => [viewer.value, phase.value, runStatus.value.runner_status], () => {
+  if (!viewer.value || phase.value !== 2 || viewerReportTimer || viewerReportFailed.value) return
+  const status = runStatus.value.runner_status
+  if (status === 'failed' || status === 'needs_attention') return
+  checkViewerReport()
+  viewerReportTimer = setInterval(checkViewerReport, 3000)
+})
+
+const viewerTryAttach = async () => {
+  try {
+    const res = await getRunStatus(props.simulationId)
+    if (!isMounted) return true
+    const status = res?.data?.runner_status
+    if (res?.success && res.data && status && status !== 'idle') {
+      await attachToRunningSimulation(res.data)
+      return true
+    }
+  } catch (err) {
+    // 404 / jaringan: server belum menyiapkan simulasi — tunggu, jangan memulai apa pun.
+  }
+  return false
+}
+
+let viewerAttachInFlight = false
+const viewerBootstrap = async () => {
+  if (await viewerTryAttach()) return
+  if (!isMounted) return
+  viewerWaitTimer = setInterval(async () => {
+    if (viewerAttachInFlight) return
+    viewerAttachInFlight = true
+    try {
+      if (await viewerTryAttach()) stopViewerWaitTimer()
+    } finally {
+      viewerAttachInFlight = false
+    }
+  }, 3000)
+}
+const stopViewerWaitTimer = () => {
+  if (viewerWaitTimer) { clearInterval(viewerWaitTimer); viewerWaitTimer = null }
+}
+
 // 报告生成失败时的自动重试上限和退避延迟。只对"临时性"错误（网络/超时/5xx）
 // 生效——真正的失败（后端明确 400 等）不重试，重试也没用，只会让用户多等。
 const REPORT_GEN_MAX_ATTEMPTS = 3
 const REPORT_GEN_RETRY_DELAY_MS = 3000
 
 const handleNextStep = async (attempt = 1) => {
+  if (viewer.value) return
   if (!props.simulationId) {
     addLog(t('log.errorMissingSimId'))
     return
@@ -1104,6 +1224,11 @@ onMounted(async () => {
 
   if (!props.simulationId) return
 
+  if (viewer.value) {
+    await viewerBootstrap()
+    return
+  }
+
   // Attach-first: 先看这个模拟是不是已经在跑（或已经跑完），避免每次挂载
   // 组件都强制重开一次——那会打断正在进行的模拟，也会丢掉之前的日志。
   try {
@@ -1153,6 +1278,7 @@ onMounted(async () => {
 onUnmounted(() => {
   isMounted = false
   stopPolling()
+  stopViewerTimers()
 })
 </script>
 
@@ -1165,6 +1291,28 @@ onUnmounted(() => {
   font-family: 'Space Grotesk', 'Noto Sans SC', system-ui, sans-serif;
   overflow: hidden;
 }
+
+/* --- Viewer status (read-only) --- */
+.viewer-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #000;
+}
+.viewer-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #FF5722;
+  animation: viewer-pulse 1.2s ease-in-out infinite;
+}
+.viewer-status-dot.is-done { background: #4CAF50; animation: none; }
+.viewer-status-dot.is-error { background: #F44336; animation: none; }
+.viewer-status-progress { font-weight: 400; color: #666; font-family: 'JetBrains Mono', monospace; }
+@keyframes viewer-pulse { 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .viewer-status-dot { animation: none; } }
 
 /* --- Control Bar --- */
 .control-bar {

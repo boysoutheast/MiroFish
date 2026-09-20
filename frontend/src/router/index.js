@@ -5,6 +5,7 @@ import SimulationView from '../views/SimulationView.vue'
 import SimulationRunView from '../views/SimulationRunView.vue'
 import ReportView from '../views/ReportView.vue'
 import InteractionView from '../views/InteractionView.vue'
+import { markViewerFromQuery } from '../utils/viewerMode'
 
 const routes = [
   {
@@ -47,6 +48,14 @@ const routes = [
 const router = createRouter({
   history: createWebHistory(),
   routes
+})
+
+// Mode viewer: bawa `?viewer=1` ke setiap navigasi supaya tidak hilang di tengah alur.
+router.beforeEach((to) => {
+  if (markViewerFromQuery(to.query) && to.query.viewer !== '1') {
+    return { path: to.path, query: { ...to.query, viewer: '1' }, hash: to.hash, replace: true }
+  }
+  return true
 })
 
 export default router

@@ -156,9 +156,13 @@
         </div>
         
         <div class="card-content">
-          <p class="api-note">POST /api/simulation/create</p>
+          <p v-if="!viewer" class="api-note">POST /api/simulation/create</p>
           <p class="description">{{ $t('step1.buildCompleteDesc') }}</p>
+          <p v-if="viewer" class="viewer-note" role="status" aria-live="polite">
+            {{ currentPhase >= 2 ? $t('viewer.processGraphReady') : $t('viewer.processWaiting') }}
+          </p>
           <button
+            v-if="!viewer"
             class="action-btn"
             :disabled="currentPhase < 2 || creatingSimulation || checkingExisting"
             @click="handleEnterEnvSetup"
@@ -168,7 +172,7 @@
           </button>
 
           <!-- 检查已有模拟失败 -->
-          <div v-if="checkExistingError" class="check-error-box">
+          <div v-if="!viewer && checkExistingError" class="check-error-box">
             <span class="check-error-text">{{ $t('step1.checkExistingFailed', { error: checkExistingError }) }}</span>
             <button class="retry-btn" :disabled="checkingExisting" @click="handleEnterEnvSetup">{{ $t('step1.retry') }}</button>
           </div>
@@ -223,11 +227,16 @@
 </template>
 
 <script setup>
-import { computed, ref, watch, nextTick } from 'vue'
+import { computed, ref, watch, nextTick, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { createSimulation, getSimulationHistory } from '../api/simulation'
 import { getSimulationProgress, resolveSimulationRoute } from '../utils/simulationProgress'
+import { useViewerMode } from '../utils/viewerMode'
+
+// Mode viewer: tidak ada pembuatan simulasi dari sini. Server yang membuatnya;
+// komponen ini hanya menunggu (GET) lalu pindah ke halaman yang sesuai.
+const { viewer } = useViewerMode()
 
 const router = useRouter()
 const { t } = useI18n()
@@ -266,6 +275,54 @@ const fetchMatchingSimulations = async () => {
   return all.filter(sim => sim.project_id === props.projectData.project_id)
 }
 
+let viewerPollTimer = null
+let viewerInFlight = false
+let viewerUnmounted = false
+const stopViewerPoll = () => {
+  if (viewerPollTimer) { clearInterval(viewerPollTimer); viewerPollTimer = null }
+}
+// Pilih simulasi yang BENAR: terbaru (created_at) yang tidak failed.
+const pickViewerSimulation = (matches) => {
+  const byNewest = [...matches]
+    .filter(sim => sim.status !== 'failed')
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+  return byNewest[0] || null
+}
+const viewerFollowSimulation = async () => {
+  if (viewerInFlight || viewerUnmounted) return
+  viewerInFlight = true
+  try {
+    const matches = await fetchMatchingSimulations()
+    if (viewerUnmounted) return
+    const target = pickViewerSimulation(matches)
+    if (!target) return
+    try {
+      if (target.report_id) {
+        await router.replace({ name: 'Report', params: { reportId: target.report_id } })
+      } else {
+        await router.replace({ name: 'Simulation', params: { simulationId: target.simulation_id } })
+      }
+      stopViewerPoll()
+    } catch (navErr) {
+      console.warn('viewer: navigasi gagal, polling lanjut:', navErr)
+    }
+  } catch (err) {
+    console.warn('viewer: cek simulasi gagal:', err)
+  } finally {
+    viewerInFlight = false
+  }
+}
+watch(
+  () => [viewer.value, props.currentPhase, props.projectData?.graph_id],
+  () => {
+    if (!viewer.value || props.currentPhase < 2 || !props.projectData?.graph_id || viewerPollTimer) return
+    viewerFollowSimulation()
+    viewerPollTimer = setInterval(viewerFollowSimulation, 3000)
+  },
+  { immediate: true }
+)
+onUnmounted(() => { viewerUnmounted = true; stopViewerPoll() })
+
 // 唯一一个且已有报告 -> 直接跳转 Report，零点击
 // 共用于手动点击和自动检查这两条路径
 const redirectIfSingleReport = (matches) => {
@@ -281,6 +338,7 @@ const redirectIfSingleReport = (matches) => {
 
 // 进入环境搭建 - 先检查该项目是否已有 simulation，避免每次都从零新建（Opsi 3）
 const handleEnterEnvSetup = async () => {
+  if (viewer.value) return
   if (!props.projectData?.project_id || !props.projectData?.graph_id) {
     console.error('缺少项目或图谱信息')
     return
@@ -318,6 +376,7 @@ const handleEnterEnvSetup = async () => {
 
 // 建新的 simulation（旧行为，"Buat Baru" 按钮或 0 已有 simulation 时走这里）
 const createNewSimulation = async () => {
+  if (viewer.value) return
   showSimulationPicker.value = false
   creatingSimulation.value = true
 
@@ -977,4 +1036,5 @@ watch(() => props.systemLogs.length, () => {
   color: #CCC;
   word-break: break-all;
 }
+.viewer-note { font-size: 13px; color: #333; font-weight: 600; }
 </style>

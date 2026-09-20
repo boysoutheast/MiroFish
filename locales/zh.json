@@ -72,7 +72,13 @@
     "layoutGraph": "图谱",
     "layoutSplit": "双栏",
     "layoutWorkbench": "工作台",
-    "stepNames": ["图谱构建", "环境搭建", "开始模拟", "报告生成", "深度互动"]
+    "stepNames": [
+      "图谱构建",
+      "环境搭建",
+      "开始模拟",
+      "报告生成",
+      "深度互动"
+    ]
   },
   "step1": {
     "ontologyGeneration": "本体生成",
@@ -695,5 +701,22 @@
     "llmSelectAgentFailed": "LLM选择Agent失败，使用默认选择: {error}",
     "generateInterviewQuestionsFailed": "生成采访问题失败: {error}",
     "generateInterviewSummaryFailed": "生成采访摘要失败: {error}"
+  },
+  "viewer": {
+    "statusPreparing": "正在自动准备模拟…",
+    "statusRunning": "正在自动运行…",
+    "statusStopping": "正在收尾模拟…",
+    "statusReporting": "正在整理报告…",
+    "statusReportReady": "报告已就绪，正在打开…",
+    "statusRecovering": "正在自动恢复，请稍候…",
+    "statusNeedsAttention": "本次运行需要我们团队处理，您无需再做任何操作。",
+    "statusFailed": "模拟意外停止。",
+    "progress": "第 {current} / {total} 轮",
+    "processWaiting": "正在自动构建知识图谱…",
+    "processGraphReady": "知识图谱已就绪，正在自动设置模拟。",
+    "homeNotice": "当前为只读视图，请返回面板查看进度。",
+    "reportFailed": "报告生成失败，我们的团队已收到通知。",
+    "noProject": "没有可显示的项目。",
+    "projectFailed": "项目意外停止，我们的团队已收到通知。"
   }
 }

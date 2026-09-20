@@ -1,5 +1,8 @@
 <template>
-  <div class="home-container">
+  <div v-if="viewer" class="home-container" role="status">
+    <p class="viewer-home-note">{{ $t('viewer.homeNotice') }}</p>
+  </div>
+  <div v-else class="home-container">
     <!-- 顶部导航栏 -->
     <nav class="navbar">
       <div class="nav-brand">Kanzen AI Panelist</div>
@@ -214,7 +217,10 @@ import { useRouter } from 'vue-router'
 import HistoryDatabase from '../components/HistoryDatabase.vue'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 
+import { useViewerMode } from '../utils/viewerMode'
+
 const router = useRouter()
+const { viewer } = useViewerMode()
 
 // 表单数据
 const formData = ref({

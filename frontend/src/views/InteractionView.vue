@@ -3,7 +3,7 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">Kanzen AI Panelist</div>
+        <div class="brand" @click="!isViewerMode() && router.push('/')">Kanzen AI Panelist</div>
       </div>
       
       <div class="header-center">
@@ -72,6 +72,7 @@ import Step5Interaction from '../components/Step5Interaction.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation } from '../api/simulation'
 import { getReport } from '../api/report'
+import { isViewerMode } from '../utils/viewerMode'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 
 const route = useRoute()

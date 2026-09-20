@@ -84,6 +84,7 @@ import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
+import { isViewerMode } from '../utils/viewerMode'
 
 const route = useRoute()
 const router = useRouter()
@@ -160,6 +161,7 @@ const toggleMaximize = (target) => {
 }
 
 const handleNextStep = (params = {}) => {
+  if (isViewerMode()) return
   if (currentStep.value < 5) {
     currentStep.value++
     addLog(t('log.enterStep', { step: currentStep.value, name: stepNames.value[currentStep.value - 1] }))
@@ -172,6 +174,7 @@ const handleNextStep = (params = {}) => {
 }
 
 const handleGoBack = () => {
+  if (isViewerMode()) return
   if (currentStep.value > 1) {
     currentStep.value--
     addLog(t('log.returnToStep', { step: currentStep.value, name: stepNames.value[currentStep.value - 1] }))
@@ -183,6 +186,11 @@ const handleGoBack = () => {
 const initProject = async () => {
   addLog('Project view initialized.')
   if (currentProjectId.value === 'new') {
+    // Mode viewer: tidak ada upload/ontology dari sini (server yang memulai).
+    if (isViewerMode()) {
+      error.value = t('viewer.noProject')
+      return
+    }
     await handleNewProject()
   } else {
     await loadProject()
@@ -239,7 +247,12 @@ const loadProject = async () => {
       updatePhaseByStatus(res.data.status)
       addLog(`Project loaded. Status: ${res.data.status}`)
       
-      if (res.data.status === 'ontology_generated' && !res.data.graph_id) {
+      if (isViewerMode() && !res.data.graph_id && ['created', 'ontology_generated'].includes(res.data.status)) {
+        // Viewer: server yang membangun graph. Cuma tunggu perubahan status (GET).
+        viewerWaitForProject()
+      } else if (isViewerMode() && res.data.status === 'failed') {
+        error.value = t('viewer.projectFailed')
+      } else if (res.data.status === 'ontology_generated' && !res.data.graph_id) {
         await startBuildGraph()
       } else if (res.data.status === 'graph_building' && res.data.graph_build_task_id) {
         currentPhase.value = 1
@@ -258,6 +271,41 @@ const loadProject = async () => {
   } finally {
     loading.value = false
   }
+}
+
+let viewerProjectTimer = null
+let viewerProjectInFlight = false
+let viewerUnmounted = false
+const stopViewerProjectTimer = () => {
+  if (viewerProjectTimer) { clearInterval(viewerProjectTimer); viewerProjectTimer = null }
+}
+const viewerWaitForProject = () => {
+  if (viewerProjectTimer) return
+  viewerProjectTimer = setInterval(async () => {
+    if (viewerProjectInFlight || viewerUnmounted) return
+    viewerProjectInFlight = true
+    try {
+      const res = await getProject(currentProjectId.value)
+      if (viewerUnmounted || !res.success) return
+      projectData.value = res.data
+      if (res.data.status === 'failed') {
+        stopViewerProjectTimer()
+        error.value = t('viewer.projectFailed')
+      } else if (res.data.status === 'graph_building' && res.data.graph_build_task_id) {
+        stopViewerProjectTimer()
+        currentPhase.value = 1
+        startPollingTask(res.data.graph_build_task_id)
+      } else if (res.data.status === 'graph_completed' && res.data.graph_id) {
+        stopViewerProjectTimer()
+        currentPhase.value = 2
+        await loadGraph(res.data.graph_id)
+      }
+    } catch (e) {
+      console.warn('viewer: cek project gagal', e)
+    } finally {
+      viewerProjectInFlight = false
+    }
+  }, 3000)
 }
 
 const updatePhaseByStatus = (status) => {
@@ -411,6 +459,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  viewerUnmounted = true
+  stopViewerProjectTimer()
   stopPolling()
   stopGraphPolling()
 })

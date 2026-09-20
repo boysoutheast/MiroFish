@@ -70,6 +70,7 @@
       <!-- Right Panel: Step2 环境搭建 -->
       <div class="panel-wrapper right" :style="rightPanelStyle">
         <Step2EnvSetup
+          v-if="!isViewerMode()"
           :simulationId="currentSimulationId"
           :projectData="projectData"
           :graphData="graphData"
@@ -90,6 +91,7 @@ import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { getProject, getGraphData } from '../api/graph'
+import { isViewerMode } from '../utils/viewerMode'
 import { getSimulation, stopSimulation, getEnvStatus, closeSimulationEnv } from '../api/simulation'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 import { useI18n } from 'vue-i18n'
@@ -165,6 +167,7 @@ const toggleMaximize = (target) => {
 }
 
 const handleGoBack = () => {
+  if (isViewerMode()) return
   // 返回到 process 页面
   if (projectData.value?.project_id) {
     router.push({ name: 'Process', params: { projectId: projectData.value.project_id } })
@@ -174,6 +177,7 @@ const handleGoBack = () => {
 }
 
 const handleNextStep = (params = {}) => {
+  if (isViewerMode()) return
   addLog(t('log.enterStep3'))
 
   // 记录模拟轮数配置
@@ -407,6 +411,13 @@ const redirectByRealStatus = async () => {
 
 onMounted(async () => {
   addLog(t('log.simViewInit'))
+
+  // Mode viewer: Step 2 (prepare/start) dikerjakan server — tidak pernah dirender di sini.
+  // Redirect DULU, isCheckingRedirect tetap true sehingga Step2EnvSetup tidak sempat terpasang.
+  if (isViewerMode()) {
+    router.replace({ name: 'SimulationRun', params: { simulationId: currentSimulationId.value } })
+    return
+  }
 
   // 先确认真实状态，该转走的（已有报告 / 正在跑）在这里就转走，别让 Step2 先渲染出来
   const redirected = await redirectByRealStatus()

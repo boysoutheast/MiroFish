@@ -72,7 +72,13 @@
     "layoutGraph": "Graph",
     "layoutSplit": "Split",
     "layoutWorkbench": "Workbench",
-    "stepNames": ["Graph Build", "Env Setup", "Run Simulation", "Report Generation", "Deep Interaction"]
+    "stepNames": [
+      "Graph Build",
+      "Env Setup",
+      "Run Simulation",
+      "Report Generation",
+      "Deep Interaction"
+    ]
   },
   "step1": {
     "ontologyGeneration": "Ontology Generation",
@@ -695,5 +701,22 @@
     "llmSelectAgentFailed": "LLM agent selection failed, using default selection: {error}",
     "generateInterviewQuestionsFailed": "Failed to generate interview questions: {error}",
     "generateInterviewSummaryFailed": "Failed to generate interview summary: {error}"
+  },
+  "viewer": {
+    "statusPreparing": "Preparing the simulation automatically…",
+    "statusRunning": "Running automatically…",
+    "statusStopping": "Wrapping up the simulation…",
+    "statusReporting": "Compiling the report…",
+    "statusReportReady": "Report is ready. Opening it…",
+    "statusRecovering": "Recovering automatically, please wait…",
+    "statusNeedsAttention": "This run needs attention from our team. Nothing else is required from you.",
+    "statusFailed": "The simulation stopped unexpectedly.",
+    "progress": "Round {current} of {total}",
+    "processWaiting": "Setting up the knowledge graph automatically…",
+    "processGraphReady": "Knowledge graph is ready. The simulation is being set up automatically.",
+    "homeNotice": "This is a read-only view. Please return to the panel to see progress.",
+    "reportFailed": "The report could not be compiled. Our team has been notified.",
+    "noProject": "No project to display.",
+    "projectFailed": "The project stopped unexpectedly. Our team has been notified."
   }
 }

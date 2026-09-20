@@ -634,6 +634,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { isViewerMode } from '../utils/viewerMode'
 import { useI18n } from 'vue-i18n'
 import {
   prepareSimulation,
@@ -754,6 +755,7 @@ const handlePrepareFailure = (message) => {
 
 // 处理开始模拟按钮点击
 const handleStartSimulation = () => {
+  if (isViewerMode()) return
   // 构建传递给父组件的参数
   const params = {}
   
@@ -782,6 +784,8 @@ const selectProfile = (profile) => {
 
 // 自动开始准备模拟
 const startPrepareSimulation = async () => {
+  // Mode viewer: server yang menyiapkan simulasi; tidak ada API mutasi dari sini.
+  if (isViewerMode()) return
   if (!props.simulationId) {
     addLog(t('log.errorMissingSimId'))
     emit('update-status', 'error')
@@ -1136,6 +1140,7 @@ const attachToPreparingSimulation = () => {
 let isMounted = true
 
 onMounted(async () => {
+  if (isViewerMode()) return
   addLog(t('log.step2Init'))
 
   if (!props.simulationId) return
