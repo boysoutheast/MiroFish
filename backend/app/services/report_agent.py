@@ -13,9 +13,9 @@ import os
 import json
 import time
 import re
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 from ..config import Config
@@ -1805,8 +1805,10 @@ class ReportAgent:
                     report_id, "failed", -1, t('progress.reportFailed', error=str(e)),
                     completed_sections=completed_section_titles
                 )
-            except Exception:
-                pass  # 忽略保存失败的错误
+            except Exception as save_err:
+                logger.warning(
+                    f"Could not persist failed status for {report_id}: {save_err}"
+                )
             
             # 关闭控制台日志记录器
             if self.console_logger:
@@ -2553,25 +2555,166 @@ class ReportManager:
             ingestion_note=data.get('ingestion_note'),
         )
     
+    # A pending/planning/generating report only counts as "running" while its
+    # on-disk heartbeat (mtime of meta.json/progress.json) is fresher than this.
+    HEARTBEAT_STALE_MINUTES = 10
+    ORPHAN_ERROR = "orphaned: no live worker"
+    _IN_PROGRESS_STATUSES = frozenset({"pending", "planning", "generating"})
+
+    @staticmethod
+    def _now() -> datetime:
+        """UTC-aware now; patched in tests to control time."""
+        return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _parse_created_at(raw: str) -> Optional[datetime]:
+        """ISO string -> UTC-aware datetime (naive treated as UTC); None if bad."""
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.strip().replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
     @classmethod
-    def get_report_by_simulation(cls, simulation_id: str) -> Optional[Report]:
-        """根据模拟ID获取报告"""
+    def _scan_report_metas(cls, simulation_id: str) -> List[Dict[str, Any]]:
+        """One listdir pass; return meta dicts of reports for simulation_id.
+
+        Unreadable/corrupt reports are skipped with a warning so one bad
+        report never breaks lookup of the others. ``created_dt`` is UTC-aware
+        (falls back to meta.json mtime); ``heartbeat`` is the newest mtime of
+        meta.json/progress.json as epoch seconds.
+        """
         cls._ensure_reports_dir()
-        
+        found: List[Dict[str, Any]] = []
         for item in os.listdir(cls.REPORTS_DIR):
             item_path = os.path.join(cls.REPORTS_DIR, item)
-            # 新格式：文件夹
             if os.path.isdir(item_path):
-                report = cls.get_report(item)
-                if report and report.simulation_id == simulation_id:
+                report_id, meta_path = item, cls._get_report_path(item)
+                progress_path = cls._get_progress_path(item)
+            elif item.endswith('.json'):  # legacy flat layout
+                report_id, meta_path, progress_path = item[:-5], item_path, None
+            else:
+                continue
+            try:
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError("meta is not an object")
+                if data.get('simulation_id') != simulation_id:
+                    continue
+                mtimes = []
+                for p in (meta_path, progress_path):
+                    try:
+                        if p:
+                            mtimes.append(os.path.getmtime(p))
+                    except OSError:
+                        pass
+                meta_mtime = mtimes[0] if mtimes else 0.0
+                created_dt = cls._parse_created_at(str(data.get('created_at') or ''))
+                if created_dt is None:
+                    created_dt = datetime.fromtimestamp(meta_mtime, timezone.utc)
+                found.append({
+                    "report_id": data.get('report_id') or report_id,
+                    "folder_id": report_id,
+                    "status": str(data.get('status', '')),
+                    "created_dt": created_dt,
+                    "heartbeat": max(mtimes) if mtimes else None,
+                })
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                logger.warning(f"Skip unreadable report {report_id}: {e}")
+        return found
+
+    @staticmethod
+    def _meta_sort_key(meta: Dict[str, Any]):
+        # Deterministic: newest created_at, ties broken by report_id.
+        return (meta["created_dt"], meta["report_id"])
+
+    @classmethod
+    def get_report_by_simulation(cls, simulation_id: str) -> Optional[Report]:
+        """Deterministic lookup: newest COMPLETED report, else newest of any status."""
+        metas = cls._scan_report_metas(simulation_id)
+        completed = [m for m in metas if m["status"] == ReportStatus.COMPLETED.value]
+        for pool in (completed, metas):
+            for meta in sorted(pool, key=cls._meta_sort_key, reverse=True):
+                try:
+                    report = cls.get_report(meta["folder_id"])
+                except Exception as e:
+                    logger.warning(f"Skip unreadable report {meta['folder_id']}: {e}")
+                    continue
+                if report:
                     return report
-            # 兼容旧格式：JSON文件
-            elif item.endswith('.json'):
-                report_id = item[:-5]
-                report = cls.get_report(report_id)
-                if report and report.simulation_id == simulation_id:
-                    return report
-        
+        return None
+
+    @classmethod
+    def touch_heartbeat(cls, report_id: str) -> None:
+        """Best-effort: bump progress.json mtime so the worker counts as alive."""
+        try:
+            path = cls._get_progress_path(report_id)
+            if os.path.exists(path):
+                os.utime(path, None)
+        except Exception as e:
+            logger.warning(f"Heartbeat touch failed for {report_id}: {e}")
+
+    @classmethod
+    def mark_failed(cls, report_id: str, error: str) -> None:
+        """Best-effort: mark meta 'failed'. Never raises; logs a warning on failure."""
+        try:
+            report = cls.get_report(report_id)
+            if report is None:
+                return
+            report.status = ReportStatus.FAILED
+            report.error = error
+            cls.save_report(report)
+            cls.update_progress(report_id, "failed", -1, error)
+        except Exception as e:
+            logger.warning(f"Could not mark report {report_id} failed: {e}")
+
+    @classmethod
+    def get_active_report_by_simulation(
+        cls,
+        simulation_id: str,
+        stale_minutes: Optional[int] = None,
+        ignore_report_ids: Iterable[str] = (),
+        mark_zombies: bool = False,
+    ) -> Optional[Report]:
+        """Newest pending/planning/generating report with a FRESH heartbeat.
+
+        Reports in ``ignore_report_ids`` (e.g. owned by a terminal in-memory
+        task) are skipped. In-progress reports with a stale/missing/future
+        heartbeat are zombies: never returned; with ``mark_zombies`` they are
+        marked failed (best-effort).
+        """
+        stale = (
+            cls.HEARTBEAT_STALE_MINUTES if stale_minutes is None else stale_minutes
+        )
+        ignore = set(ignore_report_ids)
+        now_ts = cls._now().timestamp()
+        active = []
+        for meta in cls._scan_report_metas(simulation_id):
+            if meta["status"] not in cls._IN_PROGRESS_STATUSES:
+                continue
+            if meta["report_id"] in ignore or meta["folder_id"] in ignore:
+                continue
+            hb = meta["heartbeat"]
+            age = None if hb is None else now_ts - hb
+            if age is not None and 0 <= age < stale * 60:
+                active.append(meta)
+            elif mark_zombies:
+                cls.mark_failed(meta["folder_id"], cls.ORPHAN_ERROR)
+        for meta in sorted(active, key=cls._meta_sort_key, reverse=True):
+            try:
+                report = cls.get_report(meta["folder_id"])
+            except Exception as e:
+                logger.warning(f"Skip unreadable report {meta['folder_id']}: {e}")
+                continue
+            if report:
+                return report
         return None
     
     @classmethod

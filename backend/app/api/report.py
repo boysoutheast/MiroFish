@@ -6,11 +6,13 @@ Report API路由
 import os
 import traceback
 import threading
+import time
+from datetime import datetime
 from flask import request, jsonify, send_file
 
 from . import report_bp
 from ..config import Config
-from ..services.report_agent import ReportAgent, ReportManager, ReportStatus
+from ..services.report_agent import Report, ReportAgent, ReportManager, ReportStatus
 from ..services.simulation_manager import SimulationManager
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
 from ..services.zep_graph_memory_updater import ZepGraphMemoryManager
@@ -68,6 +70,9 @@ def _apply_ingestion_incomplete_note(report, simulation_id: str) -> None:
 
 
 # ============== 报告生成接口 ==============
+
+HEARTBEAT_TOUCH_INTERVAL_SECONDS = 30
+
 
 @report_bp.route('/generate', methods=['POST'])
 def generate_report():
@@ -271,6 +276,63 @@ def generate_report():
                     })
 
             task_manager = TaskManager()
+            # Duplicate-generate guard (under graph_lifecycle_lock, so two
+            # concurrent requests cannot both pass). The in-memory TaskManager
+            # is the source of truth for "running"; the disk record only
+            # blocks while its heartbeat is fresh (zombies never block, even
+            # with force_regenerate).
+            terminal_report_ids = set()
+            for task in task_manager.list_tasks(task_type="report_generate"):
+                meta = task.get("metadata") or {}
+                if meta.get("simulation_id") != simulation_id:
+                    continue
+                if task.get("status") in ("pending", "processing"):
+                    return jsonify({
+                        "success": True,
+                        "data": {
+                            "simulation_id": simulation_id,
+                            "report_id": meta.get("report_id"),
+                            "task_id": task["task_id"],
+                            "status": "generating",
+                            "message": t('api.reportGenerateStarted'),
+                            "already_generated": False,
+                            "already_running": True,
+                        }
+                    })
+                if meta.get("report_id"):
+                    terminal_report_ids.add(meta["report_id"])
+            active_report = ReportManager.get_active_report_by_simulation(
+                simulation_id,
+                ignore_report_ids=terminal_report_ids,
+                mark_zombies=True,
+            )
+            if active_report is not None:
+                return jsonify({
+                    "success": True,
+                    "data": {
+                        "simulation_id": simulation_id,
+                        "report_id": active_report.report_id,
+                        "task_id": None,
+                        "status": "generating",
+                        "message": t('api.reportGenerateStarted'),
+                        "already_generated": False,
+                        "already_running": True,
+                    }
+                })
+            # Write 'pending' synchronously so the window before the worker's
+            # first write is closed for the next request.
+            ReportManager.save_report(Report(
+                report_id=report_id,
+                simulation_id=simulation_id,
+                graph_id=graph_id,
+                simulation_requirement=simulation_requirement,
+                status=ReportStatus.PENDING,
+                created_at=datetime.now().isoformat(),
+            ))
+            ReportManager.update_progress(
+                report_id, "pending", 0, t('api.initReportAgent'),
+                completed_sections=[]
+            )
             task_id = task_manager.create_task(
                 task_type="report_generate",
                 metadata={
@@ -298,7 +360,13 @@ def generate_report():
                         simulation_requirement=simulation_requirement
                     )
 
+                    last_beat = [0.0]
+
                     def progress_callback(stage, progress, message):
+                        now = time.monotonic()
+                        if now - last_beat[0] >= HEARTBEAT_TOUCH_INTERVAL_SECONDS:
+                            last_beat[0] = now
+                            ReportManager.touch_heartbeat(report_id)
                         task_manager.update_task(
                             task_id,
                             progress=progress,
@@ -332,14 +400,17 @@ def generate_report():
                 except Exception as e:
                     logger.error(f"报告生成失败: {str(e)}")
                     task_manager.fail_task(task_id, str(e))
+                    ReportManager.mark_failed(report_id, str(e))
                 finally:
                     unregister_graph_reader(graph_id, report_id)
 
             try:
                 thread = threading.Thread(target=run_generate, daemon=True)
                 thread.start()
-            except Exception:
+            except Exception as start_err:
                 unregister_graph_reader(graph_id, report_id)
+                task_manager.fail_task(task_id, str(start_err))
+                ReportManager.mark_failed(report_id, str(start_err))
                 raise
         
         return jsonify({

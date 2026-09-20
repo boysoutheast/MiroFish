@@ -167,6 +167,9 @@ def test_report_reader_lease_blocks_graph_start_and_delete(monkeypatch):
         def create_task(self, **_kwargs):
             return "task-1"
 
+        def list_tasks(self, task_type=None):
+            return []
+
         def update_task(self, *_args, **_kwargs):
             pass
 
