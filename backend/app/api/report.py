@@ -19,7 +19,7 @@ from ..services.zep_graph_memory_updater import ZepGraphMemoryManager
 from ..models.project import ProjectManager, ProjectStatus
 from ..models.task import TaskManager, TaskStatus
 from ..utils.logger import get_logger
-from ..utils.locale import t, get_locale, set_locale
+from ..utils.locale import t, get_locale, set_locale, set_output_language, resolve_output_language
 from ..utils.zep_lifecycle import (
     graph_lifecycle_lock,
     register_graph_reader,
@@ -342,10 +342,13 @@ def generate_report():
                 }
             )
             current_locale = get_locale()
+            # Bahasa keluaran: parameter opsional `language`, kalau tidak ada -> env/default 'id'
+            output_language = resolve_output_language(data.get('language'))
             register_graph_reader(graph_id, report_id)
 
             def run_generate():
                 set_locale(current_locale)
+                set_output_language(output_language)
                 try:
                     task_manager.update_task(
                         task_id,
@@ -402,6 +405,7 @@ def generate_report():
                     task_manager.fail_task(task_id, str(e))
                     ReportManager.mark_failed(report_id, str(e))
                 finally:
+                    set_output_language(None)
                     unregister_graph_reader(graph_id, report_id)
 
             try:
@@ -782,7 +786,11 @@ def chat_with_report_agent():
             simulation_requirement=simulation_requirement
         )
         
-        result = agent.chat(message=message, chat_history=chat_history)
+        set_output_language(resolve_output_language(data.get('language')))
+        try:
+            result = agent.chat(message=message, chat_history=chat_history)
+        finally:
+            set_output_language(None)
         
         return jsonify({
             "success": True,

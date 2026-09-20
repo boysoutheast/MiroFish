@@ -21,7 +21,7 @@ from enum import Enum
 from ..config import Config
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
-from ..utils.locale import get_language_instruction, t
+from ..utils.locale import get_fallback_outline, t, with_language_instruction  # with_language_instruction = bahasa keluaran (param/env/default id)
 from .zep_tools import (
     ZepToolsService, 
     SearchResult, 
@@ -1210,7 +1210,7 @@ class ReportAgent:
         if progress_callback:
             progress_callback("planning", 30, t('progress.generatingOutline'))
         
-        system_prompt = f"{PLAN_SYSTEM_PROMPT}\n\n{get_language_instruction()}"
+        system_prompt = with_language_instruction(PLAN_SYSTEM_PROMPT)
         user_prompt = PLAN_USER_PROMPT_TEMPLATE.format(
             simulation_requirement=self.simulation_requirement,
             total_nodes=context.get('graph_statistics', {}).get('total_nodes', 0),
@@ -1241,7 +1241,7 @@ class ReportAgent:
                 ))
             
             outline = ReportOutline(
-                title=response.get("title", "模拟分析报告"),
+                title=response.get("title") or get_fallback_outline()[0],
                 summary=response.get("summary", ""),
                 sections=sections
             )
@@ -1255,14 +1255,11 @@ class ReportAgent:
         except Exception as e:
             logger.error(t('report.outlinePlanFailed', error=str(e)))
             # 返回默认大纲（3个章节，作为fallback）
+            fb_title, fb_summary, fb_sections = get_fallback_outline()
             return ReportOutline(
-                title="未来预测报告",
-                summary="基于模拟预测的未来趋势与风险分析",
-                sections=[
-                    ReportSection(title="预测场景与核心发现"),
-                    ReportSection(title="人群行为预测分析"),
-                    ReportSection(title="趋势展望与风险提示")
-                ]
+                title=fb_title,
+                summary=fb_summary,
+                sections=[ReportSection(title=x) for x in fb_sections]
             )
     
     def _generate_section_react(
@@ -1306,7 +1303,7 @@ class ReportAgent:
             section_title=section.title,
             tools_description=self._get_tools_description(),
         )
-        system_prompt = f"{system_prompt}\n\n{get_language_instruction()}"
+        system_prompt = with_language_instruction(system_prompt)
 
         # 构建用户prompt - 每个已完成章节各传入最大4000字
         if previous_sections:
@@ -1859,7 +1856,7 @@ class ReportAgent:
             report_content=report_content if report_content else "（暂无报告）",
             tools_description=self._get_tools_description(),
         )
-        system_prompt = f"{system_prompt}\n\n{get_language_instruction()}"
+        system_prompt = with_language_instruction(system_prompt)
 
         # 构建消息
         messages = [{"role": "system", "content": system_prompt}]

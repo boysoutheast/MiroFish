@@ -26,5 +26,9 @@
   "de": {
     "label": "Deutsch",
     "llmInstruction": "Bitte antworten Sie auf Deutsch."
+  },
+  "id": {
+    "label": "Bahasa Indonesia",
+    "llmInstruction": "Tulis SELURUH keluaran teks (judul, bagian, ringkasan, kutipan, jawaban) dalam Bahasa Indonesia yang natural dan profesional. Jangan gunakan bahasa Mandarin atau karakter Mandarin, kecuali kutipan asli yang memang berbahasa Mandarin. Jangan menerjemahkan nama field, kunci JSON, atau kode; hanya isi teks yang berbahasa Indonesia."
   }
 }
